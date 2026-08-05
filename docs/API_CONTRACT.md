@@ -38,11 +38,11 @@ operation is read-only, because a successful sync persists provider tasks into l
 | --- | --- | --- |
 | Review request | None | Builds and validates a redacted payload locally |
 | Generate | `POST /v2/video_generation` | Explicit confirmation and persistent client request ledger |
-| Poll one | `GET /v2/query/video_generation/{task_id}` | Read-only; signed result URL stays on the server |
+| Poll one | `GET /v2/query/video_generation/{task_id}` | Read-only; a finished video is immediately secured locally |
 | Sync pool | `GET /v2/query/video_generation` | Read-only; last seven days |
 | Kill queued task | `DELETE /v2/video_generation/{task_id}` | Fresh-state check plus explicit confirmation |
 | Delete succeeded/failed record | same `DELETE` endpoint | Fresh-state check; local copy/history remains |
-| Save output | refresh task, then stream `task.content.url` | No Bearer header is sent to the CDN |
+| Save output | serve the automatic local copy, or refresh and retry it | No Bearer header is sent to the CDN |
 | Upload local input | `POST /v1/files/upload` with `purpose=video_generation_input` | Explicit authorization; seven-day provider TTL |
 | Context IR | `POST /v2/h3_context_ir` | Marked token-billed and explicitly confirmed |
 | Regenerate | `POST /v2/video_regeneration` | Marked billable and explicitly confirmed |
@@ -51,6 +51,14 @@ The provider statuses are `queued`, `running`, `succeeded`, `failed`, and `cance
 `queued` task may be cancelled. A `running` task cannot be killed through the documented API.
 Succeed/failed task records may be deleted. H3 Studio never cancels an old task when a new one is
 submitted: active tasks form an additive pool.
+
+When a refresh first observes a succeeded video task, the server immediately downloads the MP4
+before completing that refresh. A bulk provider sync starts up to two automatic downloads at once
+without exposing or persisting signed result URLs. Downloads use deterministic filenames and
+temporary `.part` files, so polling from multiple tabs and explicit Save/Preview actions reuse the
+same local result instead of downloading it again. Context IR text results are retained as text and
+do not enter this video-download path. A temporary CDN or disk failure does not change the provider's
+succeeded status; the next uncached refresh or explicit Save retries with a fresh result URL.
 
 MiniMax task queries cover the most recent seven days. A local queued/running record older than
 that window that receives a provider invalid/not-found response becomes local status `unavailable`.

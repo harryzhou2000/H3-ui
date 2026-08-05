@@ -42,9 +42,10 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - Polling must remain serialized and request-budgeted in the browser, coalesced/rate-limited across
   tabs on the server, and globally honor provider `Retry-After`. Signed output URLs remain
   server-side; never forward the Bearer header to an output CDN.
-- Video previews belong in the in-app modal player. Output previews must reuse the server-side local
-  download path; never expose signed output URLs to the player. Preserve full Context IR returned
-  text in local job history.
+- Video previews belong in the in-app modal player. As soon as polling or provider sync discovers a
+  finished video, the server must secure it under `data/downloads/`; coalesce duplicate download
+  attempts and never expose or persist signed output URLs. Output previews must reuse that local
+  path. Preserve full Context IR returned text in local job history.
 - Keep spend confirmation text aligned with MiniMax's current public pay-go pricing. If a charge
   cannot be calculated (for example an input video's duration), label it as unknown instead of
   inventing a value.

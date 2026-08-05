@@ -204,11 +204,60 @@ async def test_polling_sanitizes_signed_url_and_download_omits_bearer(make_clien
     assert "signature=private" not in refreshed.text
     assert "signature=private" not in json.dumps((await client.get("/api/jobs")).json())
 
+    local_job = (await client.get("/api/jobs")).json()[0]
+    assert local_job["downloaded_filename"] == f"h3-{task_id}.mp4"
+    assert (
+        client._transport.app.state.settings.downloads_dir / f"h3-{task_id}.mp4"
+    ).read_bytes() == (b"fake-mp4-bytes")
+
+    # The explicit save now serves the already-secured local copy and does not
+    # need to refresh the signed provider URL.
+    queries_before_save = upstream.query_calls
     saved = await client.post(f"/api/jobs/{task_id}/download")
     assert saved.status_code == 200
+    assert upstream.query_calls == queries_before_save
     download = await client.get(saved.json()["download_url"])
     assert download.content == b"fake-mp4-bytes"
     assert download.headers["content-disposition"].startswith("inline;")
+    assert upstream.cdn_had_authorization is False
+
+
+async def test_provider_sync_starts_automatic_download_for_finished_video(make_client) -> None:
+    upstream = StatefulMiniMax()
+    upstream.tasks["task-finished-sync"] = "succeeded"
+
+    def with_finished_content(request: httpx.Request) -> httpx.Response:
+        response = upstream(request)
+        if request.method == "GET" and request.url.path == "/v2/query/video_generation":
+            body = json.loads(response.content)
+            body["items"][0].update(
+                {
+                    "modality": "video",
+                    "content": {
+                        "url": "https://cdn.example.test/output.mp4?signature=private",
+                    },
+                }
+            )
+            return httpx.Response(200, json=body)
+        return response
+
+    client = make_client(with_finished_content)
+    synced = await client.post("/api/provider/tasks")
+    assert synced.status_code == 200
+    assert "signature=private" not in synced.text
+
+    filename = "h3-task-finished-sync.mp4"
+    for _ in range(20):
+        job = (await client.get("/api/jobs")).json()[0]
+        if job["downloaded_filename"] == filename:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("Automatic download did not finish")
+
+    assert (client._transport.app.state.settings.downloads_dir / filename).read_bytes() == (
+        b"fake-mp4-bytes"
+    )
     assert upstream.cdn_had_authorization is False
 
 

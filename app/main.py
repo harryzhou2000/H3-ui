@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import ipaddress
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -57,6 +58,7 @@ AMBIGUOUS_SUBMISSION_ERROR_TYPES = {
     "upstream_connection_error",
     "upstream_timeout",
 }
+LOGGER = logging.getLogger(__name__)
 
 
 def _task_id(value: str) -> str:
@@ -275,6 +277,8 @@ def create_app(
     app.state.poll_next_start = 0.0
     app.state.poll_backoff_until = 0.0
     app.state.poll_cache = {}
+    app.state.download_tasks = {}
+    app.state.download_semaphore = asyncio.Semaphore(2)
     canonical_host_header = _canonical_host_header(settings)
 
     def task_lock(task_id: str) -> asyncio.Lock:
@@ -306,6 +310,78 @@ def create_app(
             app.state.poll_backoff_until,
             time.monotonic() + retry_seconds,
         )
+
+    def local_download(task_id: str) -> dict[str, Any] | None:
+        filename = f"h3-{task_id}.mp4"
+        destination = settings.downloads_dir / filename
+        try:
+            size = destination.stat().st_size
+        except OSError:
+            return None
+        if not destination.is_file() or size <= 0:
+            return None
+        return {
+            "saved": True,
+            "filename": filename,
+            "size": size,
+            "download_url": f"/api/downloads/{filename}",
+        }
+
+    async def download_finished_video(task: dict[str, Any], output_url: str) -> dict[str, Any]:
+        task_id, task_status = _validated_provider_task(task)
+        if task_status != "succeeded":
+            raise ProviderError(409, "Task has not succeeded")
+        existing = local_download(task_id)
+        if existing:
+            store.mark_downloaded(task_id, existing["filename"])
+            return existing
+
+        filename = f"h3-{task_id}.mp4"
+        destination = settings.downloads_dir / filename
+        async with app.state.download_semaphore:
+            # Another process or an earlier worker may have completed while this
+            # task waited for a download slot.
+            existing = local_download(task_id)
+            if existing:
+                store.mark_downloaded(task_id, existing["filename"])
+                return existing
+            size = await provider.download_result(output_url, destination)
+        store.mark_downloaded(task_id, filename)
+        return {
+            "saved": True,
+            "filename": filename,
+            "size": size,
+            "download_url": f"/api/downloads/{filename}",
+        }
+
+    def start_finished_video_download(task: dict[str, Any]) -> asyncio.Task | None:
+        task_id, task_status = _validated_provider_task(task)
+        content = task.get("content")
+        output_url = content.get("url") if isinstance(content, dict) else None
+        if task_status != "succeeded" or not isinstance(output_url, str) or not output_url:
+            return None
+
+        current = app.state.download_tasks.get(task_id)
+        if current and not current.done():
+            return current
+
+        pending = asyncio.create_task(download_finished_video(task, output_url))
+        app.state.download_tasks[task_id] = pending
+
+        def finished(completed: asyncio.Task) -> None:
+            if app.state.download_tasks.get(task_id) is completed:
+                app.state.download_tasks.pop(task_id, None)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error:
+                message = (
+                    error.message if isinstance(error, ProviderError) else type(error).__name__
+                )
+                LOGGER.warning("Automatic output download failed for task %s: %s", task_id, message)
+
+        pending.add_done_callback(finished)
+        return pending
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Callable[[Request], Awaitable[Any]]):
@@ -626,27 +702,29 @@ def create_app(
             status=status,
             task_type=task_type,
         )
+        raw_items = result.get("items")
         safe = _sanitize_provider_response(result)
-        items = safe.get("items")
-        if not isinstance(items, list):
+        safe_items = safe.get("items")
+        if not isinstance(raw_items, list) or not isinstance(safe_items, list):
             raise ProviderError(
                 502,
                 "MiniMax task-list response did not include items",
                 error_type="invalid_upstream_response",
             )
-        validated: list[tuple[dict[str, Any], str, str]] = []
-        for task in items:
+        validated: list[tuple[dict[str, Any], dict[str, Any], str, str]] = []
+        for task, safe_task in zip(raw_items, safe_items, strict=True):
             task_id, task_status = _validated_provider_task(task)
-            validated.append((task, task_id, task_status))
-        for task, task_id, task_status in validated:
+            validated.append((task, safe_task, task_id, task_status))
+        for task, safe_task, task_id, task_status in validated:
             async with task_lock(task_id):
                 store.upsert_job(
                     task_id,
                     str(task.get("task_type") or "generation"),
                     task_status,
-                    response={"task": task},
+                    response={"task": safe_task},
                     created_at=_provider_created_at(task.get("created_at")),
                 )
+                start_finished_video_download(task)
         return safe
 
     @app.post("/api/jobs/{task_id}/refresh")
@@ -744,6 +822,15 @@ def create_app(
                 "at": time.monotonic(),
                 "response": safe,
             }
+            pending_download = start_finished_video_download(result["task"])
+            if pending_download:
+                try:
+                    await pending_download
+                except ProviderError:
+                    # Completion remains authoritative even when the CDN or
+                    # local disk is temporarily unavailable. A later refresh
+                    # or explicit save retries with a fresh signed URL.
+                    pass
             return safe
 
     @app.delete("/api/jobs/{task_id}/remote")
@@ -770,6 +857,18 @@ def create_app(
                 "at": time.monotonic(),
                 "response": safe_current,
             }
+            pending_download = start_finished_video_download(task)
+            if pending_download:
+                try:
+                    await pending_download
+                except ProviderError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "The finished video could not be secured locally, so its remote "
+                            "record was not deleted"
+                        ),
+                    ) from exc
             if current_status != body.expected_status:
                 raise HTTPException(
                     status_code=409,
@@ -817,28 +916,29 @@ def create_app(
     @app.post("/api/jobs/{task_id}/download")
     async def save_result(task_id: str) -> dict[str, Any]:
         task_id = _task_id(task_id)
-        raw = await provider.get_task(task_id)
-        task = raw.get("task")
-        _, task_status = _validated_provider_task(task, expected_task_id=task_id)
-        if task_status != "succeeded":
-            raise HTTPException(status_code=409, detail="Task has not succeeded")
-        content = task.get("content")
-        output_url = content.get("url") if isinstance(content, dict) else None
-        if not isinstance(output_url, str) or not output_url:
-            raise ProviderError(502, "Succeeded task did not include a video URL")
-        filename = f"h3-{task_id}.mp4"
-        destination = settings.downloads_dir / filename
-        if destination.is_file() and destination.stat().st_size:
-            size = destination.stat().st_size
-        else:
-            size = await provider.download_result(output_url, destination)
-        store.mark_downloaded(task_id, filename)
-        return {
-            "saved": True,
-            "filename": filename,
-            "size": size,
-            "download_url": f"/api/downloads/{filename}",
-        }
+        async with task_lock(task_id):
+            existing = local_download(task_id)
+            if existing:
+                store.mark_downloaded(task_id, existing["filename"])
+                return existing
+
+            raw = await provider.get_task(task_id)
+            task = raw.get("task")
+            _, task_status = _validated_provider_task(task, expected_task_id=task_id)
+            safe = _sanitize_provider_response(raw)
+            store.upsert_job(
+                task_id,
+                str(task.get("task_type") or "generation"),
+                task_status,
+                response=safe,
+                created_at=_provider_created_at(task.get("created_at")),
+            )
+            if task_status != "succeeded":
+                raise HTTPException(status_code=409, detail="Task has not succeeded")
+            pending_download = start_finished_video_download(task)
+            if not pending_download:
+                raise ProviderError(502, "Succeeded task did not include a video URL")
+            return await pending_download
 
     @app.get("/api/downloads/{filename}")
     async def download_saved_file(filename: str, request: Request) -> StreamingResponse:
