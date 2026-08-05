@@ -436,6 +436,20 @@
       </form>
     </dialog>
 
+    <dialog id="video-preview-dialog" class="modal video-preview-modal" aria-labelledby="video-preview-title">
+      <form method="dialog">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Media preview</p>
+            <h2 id="video-preview-title">Video preview</h2>
+          </div>
+          <button class="modal-close" type="submit" value="close" formnovalidate aria-label="Close video preview">×</button>
+        </div>
+        <p id="video-preview-status" class="video-preview-status">Loading video preview…</p>
+        <video id="video-preview-player" controls playsinline preload="metadata" hidden></video>
+      </form>
+    </dialog>
+
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
     <script src="app.js" type="module"></script>
   </body>

@@ -201,13 +201,19 @@ def test_errors_use_a_frontmost_modal_top_layer() -> None:
     assert '$("#error-dialog-message").textContent = message' in toast_source
 
 
-def test_input_and_output_videos_open_in_new_preview_windows() -> None:
+def test_input_and_output_videos_open_in_an_in_app_preview() -> None:
+    index = _index()
+    by_id = {attrs["id"]: (tag, attrs) for tag, attrs in index.nodes if attrs.get("id")}
     browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
 
+    assert by_id["video-preview-dialog"][0] == "dialog"
+    assert by_id["video-preview-player"][0] == "video"
     assert "function videoPreviewUrl(asset)" in browser_source
-    assert "function openVideoPreview(url)" in browser_source
+    assert "function openVideoPreview(url" in browser_source
     assert "function previewOutput(job)" in browser_source
-    assert 'window.open("about:blank", "_blank")' in browser_source
+    assert '$("#video-preview-dialog")' in browser_source
+    assert "player.src = url" in browser_source
+    assert "window.open(" not in browser_source
     assert 'makeButton("Preview video"' in browser_source
     assert "Creating a local preview copy" in browser_source
 

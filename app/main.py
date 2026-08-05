@@ -333,7 +333,8 @@ def create_app(
             "clipboard-read=(self), clipboard-write=(self)"
         )
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' data: blob: https:; media-src 'self' blob:; "
+            "default-src 'self'; img-src 'self' data: blob: https:; "
+            "media-src 'self' blob: http: https:; "
             "script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'self'"
         )

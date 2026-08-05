@@ -1381,6 +1381,32 @@ button:disabled {
   justify-self: end;
 }
 
+.video-preview-modal {
+  width: min(900px, calc(100vw - 30px));
+}
+
+.video-preview-modal form {
+  display: grid;
+}
+
+.video-preview-status {
+  margin: 20px 0;
+  color: var(--muted);
+  text-align: center;
+}
+
+.video-preview-modal video {
+  display: block;
+  width: 100%;
+  max-height: min(70vh, 720px);
+  border-radius: 12px;
+  background: #111;
+}
+
+.video-preview-modal video[hidden] {
+  display: none;
+}
+
 .toast-region {
   position: fixed;
   right: 18px;

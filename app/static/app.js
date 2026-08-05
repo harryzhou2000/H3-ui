@@ -148,15 +148,31 @@ function makeButton(label, className, onClick, disabled = false) {
   return button;
 }
 
-function openVideoPreview(url) {
-  const previewWindow = window.open("about:blank", "_blank");
-  if (!previewWindow) {
-    toast("The browser blocked the video preview window. Allow pop-ups for H3 Studio.", true);
-    return null;
-  }
-  previewWindow.opener = null;
-  previewWindow.location.replace(url);
-  return previewWindow;
+function resetVideoPreview() {
+  const player = $("#video-preview-player");
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  player.hidden = true;
+}
+
+function prepareVideoPreview(title, message) {
+  const dialog = $("#video-preview-dialog");
+  resetVideoPreview();
+  $("#video-preview-title").textContent = title;
+  const status = $("#video-preview-status");
+  status.textContent = message;
+  status.hidden = false;
+  if (!dialog.open) dialog.showModal();
+}
+
+function openVideoPreview(url, title = "Video preview") {
+  prepareVideoPreview(title, "Loading video preview…");
+  const player = $("#video-preview-player");
+  player.src = url;
+  player.hidden = false;
+  $("#video-preview-status").hidden = true;
+  player.load();
 }
 
 function setupNativeClipboard() {
@@ -349,7 +365,7 @@ function renderAssets() {
     const previewUrl = videoPreviewUrl(asset);
     if (previewUrl) {
       actions.append(
-        makeButton("Preview video", "micro-button", () => openVideoPreview(previewUrl)),
+        makeButton("Preview video", "micro-button", () => openVideoPreview(previewUrl, asset.name)),
       );
     }
     if (asset.source_type === "local") {
@@ -1187,12 +1203,7 @@ async function removeLocalJob(job) {
 }
 
 async function previewOutput(job) {
-  const previewWindow = window.open("about:blank", "_blank");
-  if (!previewWindow) {
-    toast("The browser blocked the video preview window. Allow pop-ups for H3 Studio.", true);
-    return;
-  }
-  previewWindow.opener = null;
+  prepareVideoPreview(`Output ${job.task_id}`, "Creating a local preview copy…");
   try {
     let previewUrl;
     if (job.downloaded_filename) {
@@ -1205,10 +1216,9 @@ async function previewOutput(job) {
       previewUrl = result.download_url;
       await loadJobs();
     }
-    previewWindow.location.replace(previewUrl);
-    toast("Video preview opened in a new window.");
+    openVideoPreview(previewUrl, `Output ${job.task_id}`);
   } catch (error) {
-    previewWindow.close();
+    $("#video-preview-dialog").close("error");
     toast(error.message, true);
   }
 }
@@ -1439,6 +1449,7 @@ function setupEvents() {
   $("#paste-prompt").addEventListener("click", pastePrompt);
   $("#copy-ir-result").addEventListener("click", copyIrResult);
   $("#use-ir-result").addEventListener("click", useIrResultAsDirection);
+  $("#video-preview-dialog").addEventListener("close", resetVideoPreview);
   for (const id of ["resolution", "duration", "ratio", "watermark"]) {
     $(`#${id}`).addEventListener("change", () => {
       updateCost();

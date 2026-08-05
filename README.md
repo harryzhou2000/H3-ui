@@ -57,10 +57,10 @@ preview; local JPEG/PNG/WebP images can create a center-cropped, downsized copy 
 ratio and maximum edge while preserving the original. Native clipboard shortcuts are preserved in
 all text fields, with explicit Copy/Paste controls on the main prompt.
 
-Input videos with a local or public URL have **Preview video**, which opens the browser's native
-player in a separate window. Completed output previews first create or reuse a local MP4 copy, then
-open that local file in a new window; expiring signed provider URLs and Bearer credentials never
-reach the preview window. Completed Context IR tasks expose their full returned text with Copy and
+Input videos with a local or public URL have **Preview video**, which opens an in-app popout player.
+Completed output previews first create or reuse a local MP4 copy, then play that local file in the
+same popout; expiring signed provider URLs and Bearer credentials never reach the player. Completed
+Context IR tasks expose their full returned text with Copy and
 **Use as Direction** actions. Errors use a dedicated top-layer dialog so an open editor or
 confirmation window cannot hide them.
 
