@@ -213,6 +213,9 @@ def test_input_and_output_videos_open_in_an_in_app_preview() -> None:
     assert "function previewOutput(job)" in browser_source
     assert '$("#video-preview-dialog")' in browser_source
     assert "player.src = url" in browser_source
+    assert "player.defaultMuted = false" in browser_source
+    assert "player.muted = false" in browser_source
+    assert "player.volume = 1" in browser_source
     assert "window.open(" not in browser_source
     assert 'makeButton("Preview video"' in browser_source
     assert "Creating a local preview copy" in browser_source

@@ -169,6 +169,10 @@ function prepareVideoPreview(title, message) {
 function openVideoPreview(url, title = "Video preview") {
   prepareVideoPreview(title, "Loading video preview…");
   const player = $("#video-preview-player");
+  player.removeAttribute("muted");
+  player.defaultMuted = false;
+  player.muted = false;
+  player.volume = 1;
   player.src = url;
   player.hidden = false;
   $("#video-preview-status").hidden = true;

@@ -60,7 +60,8 @@ all text fields, with explicit Copy/Paste controls on the main prompt.
 Input videos with a local or public URL have **Preview video**, which opens an in-app popout player.
 Completed output previews first create or reuse a local MP4 copy, then play that local file in the
 same popout; expiring signed provider URLs and Bearer credentials never reach the player. Completed
-Context IR tasks expose their full returned text with Copy and
+The popout explicitly opens unmuted at full volume and plays any audio track embedded in the source
+MP4. Context IR tasks expose their full returned text with Copy and
 **Use as Direction** actions. Errors use a dedicated top-layer dialog so an open editor or
 confirmation window cannot hide them.
 
