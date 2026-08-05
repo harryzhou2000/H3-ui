@@ -65,15 +65,15 @@
             <span aria-hidden="true">⌕</span>
             <input id="asset-search" type="search" placeholder="Search inputs or tags" />
           </label>
-          <div id="asset-filters" class="segmented segmented-compact" aria-label="Filter assets">
-            <button class="is-active" type="button" data-kind="all">All</button>
-            <button type="button" data-kind="text">Text</button>
-            <button type="button" data-kind="image">Images</button>
-            <button type="button" data-kind="video">Video</button>
-            <button type="button" data-kind="audio">Audio</button>
+          <div id="asset-filters" class="segmented segmented-compact" role="group" aria-label="Filter assets">
+            <button class="is-active" type="button" data-kind="all" aria-pressed="true">All</button>
+            <button type="button" data-kind="text" aria-pressed="false">Text</button>
+            <button type="button" data-kind="image" aria-pressed="false">Images</button>
+            <button type="button" data-kind="video" aria-pressed="false">Video</button>
+            <button type="button" data-kind="audio" aria-pressed="false">Audio</button>
           </div>
 
-          <div id="drop-zone" class="drop-zone" tabindex="0">
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Choose files or drop them here">
             <span class="drop-icon">↧</span>
             <strong>Drop files here</strong>
             <small>Images ≤30 MB · video ≤50 MB · audio ≤15 MB</small>
@@ -183,7 +183,7 @@
             </button>
             <button id="generate" class="button button-accent button-large" type="button" disabled>
               Generate video
-              <span id="cost-inline">from ¥2.00</span>
+              <span id="cost-inline">¥2.00</span>
             </button>
           </div>
 
@@ -219,16 +219,19 @@
           </div>
 
           <div class="pool-toolbar">
-            <div id="job-filters" class="segmented" aria-label="Filter task pool">
-              <button class="is-active" type="button" data-status="active">Active</button>
-              <button type="button" data-status="all">All</button>
-              <button type="button" data-status="complete">Done</button>
+            <div id="job-filters" class="segmented" role="group" aria-label="Filter task pool">
+              <button class="is-active" type="button" data-status="active" aria-pressed="true">Active</button>
+              <button type="button" data-status="all" aria-pressed="false">All</button>
+              <button type="button" data-status="complete" aria-pressed="false">Done</button>
             </div>
             <button id="sync-tasks" class="icon-button" type="button" title="Sync recent MiniMax tasks" aria-label="Sync recent MiniMax tasks">↻</button>
           </div>
 
           <div class="polling-row">
-            <span><i class="live-pulse"></i> Polling every 8 seconds</span>
+            <span id="polling-status" aria-live="polite">
+              <i class="live-pulse" aria-hidden="true"></i>
+              <span id="polling-copy">Polling every 8 seconds</span>
+            </span>
             <label class="mini-switch">
               <span class="sr-only">Enable automatic polling</span>
               <input id="polling-toggle" type="checkbox" checked />
@@ -249,12 +252,12 @@
       </main>
     </div>
 
-    <dialog id="text-dialog" class="modal">
+    <dialog id="text-dialog" class="modal" aria-labelledby="text-dialog-title">
       <form method="dialog" id="text-form">
         <div class="modal-heading">
           <div>
             <p class="eyebrow">Input library</p>
-            <h2>Save a text prompt</h2>
+            <h2 id="text-dialog-title">Save a text prompt</h2>
           </div>
           <button class="modal-close" value="cancel" aria-label="Close">×</button>
         </div>
@@ -277,12 +280,12 @@
       </form>
     </dialog>
 
-    <dialog id="remote-dialog" class="modal">
+    <dialog id="remote-dialog" class="modal" aria-labelledby="remote-dialog-title" aria-describedby="remote-dialog-description">
       <form method="dialog" id="remote-form">
         <div class="modal-heading">
           <div>
             <p class="eyebrow">Input library</p>
-            <h2>Add a remote input</h2>
+            <h2 id="remote-dialog-title">Add a remote input</h2>
           </div>
           <button class="modal-close" value="cancel" aria-label="Close">×</button>
         </div>
@@ -302,7 +305,7 @@
           <span>Public URL or MiniMax file ID</span>
           <input name="url" required maxlength="4096" placeholder="https://… or mm_file://123456" />
         </label>
-        <p class="form-note">Private-network URLs are blocked. MiniMax file inputs expire after seven days.</p>
+        <p id="remote-dialog-description" class="form-note">Private-network URLs are blocked. MiniMax file inputs expire after seven days.</p>
         <div class="modal-actions">
           <button class="button button-quiet" value="cancel">Cancel</button>
           <button class="button button-primary" value="default">Add input</button>
@@ -310,9 +313,9 @@
       </form>
     </dialog>
 
-    <dialog id="confirm-dialog" class="modal confirm-modal">
+    <dialog id="confirm-dialog" class="modal confirm-modal" aria-labelledby="confirm-title" aria-describedby="confirm-description">
       <form method="dialog" id="confirm-form">
-        <span id="confirm-icon" class="confirm-icon">!</span>
+        <span id="confirm-icon" class="confirm-icon" aria-hidden="true">!</span>
         <h2 id="confirm-title">Confirm operation</h2>
         <p id="confirm-description"></p>
         <div id="confirm-summary" class="confirm-summary"></div>

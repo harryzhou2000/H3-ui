@@ -1,8 +1,18 @@
+import {
+  ACTIVE_STATUSES,
+  createAttemptLedger,
+  pollActiveTaskPool,
+  taskPresentationChanged,
+} from "./pool.mjs";
+import { generationCharges, regenerationCharges } from "./billing.mjs";
+
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-const ACTIVE_STATUSES = new Set(["queued", "running"]);
-const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "deleted"]);
+const TERMINAL_STATUSES = new Set([
+  "succeeded", "failed", "cancelled", "deleted", "unavailable",
+]);
+const attempts = createAttemptLedger();
 
 const state = {
   assets: [],
@@ -15,6 +25,7 @@ const state = {
   submitting: false,
   polling: true,
   pollInFlight: new Set(),
+  pollCycle: { running: false },
   nextPollAt: new Map(),
 };
 
@@ -67,6 +78,15 @@ function setBusy(button, busy, label = "Working…") {
   button.disabled = busy;
   if (busy) button.textContent = label;
   else button.innerHTML = button.dataset.idleHtml;
+}
+
+function requireDurableAttemptLedger() {
+  if (attempts.isDurable()) return true;
+  toast(
+    "Billable task creation is disabled because this browser cannot safely preserve retry IDs. Enable session storage and reload H3 Studio.",
+    true,
+  );
+  return false;
 }
 
 function formatBytes(value) {
@@ -360,7 +380,7 @@ function buildContent() {
   return content;
 }
 
-function buildGeneration(confirmed = false, clientRequestId = `preview-${crypto.randomUUID()}`) {
+function buildGeneration(confirmed = false, clientRequestId = attempts.generation()) {
   return {
     client_request_id: clientRequestId,
     model: "MiniMax-H3",
@@ -373,17 +393,19 @@ function buildGeneration(confirmed = false, clientRequestId = `preview-${crypto.
   };
 }
 
-function buildContextIR(confirmed = false, clientRequestId = `preview-${crypto.randomUUID()}`) {
+function buildContextIR(confirmed = false, clientRequestId = attempts.context()) {
   const generation = buildGeneration(confirmed, clientRequestId);
   delete generation.resolution;
   delete generation.aigc_watermark;
   return generation;
 }
 
-function invalidatePreview() {
+function invalidatePreview({ rotateAttempt = true } = {}) {
+  if (rotateAttempt) attempts.rotateScene();
   state.validatedSignature = null;
   state.lastPreview = null;
   $("#generate").disabled = true;
+  updateCost();
   const panel = $("#validation-panel");
   panel.className = "validation-panel is-neutral";
   $(".validation-icon", panel).textContent = "◇";
@@ -410,12 +432,20 @@ async function reviewRequest() {
     state.validatedSignature = composerSignature();
     state.lastPreview = preview;
     $("#request-json").textContent = JSON.stringify(preview.payload, null, 2);
-    $("#generate").disabled = false;
-    showValidation(
-      true,
-      "Request is valid",
-      `${formatBytes(preview.estimated_request_bytes)} JSON payload. Generation is still blocked until explicit confirmation.`,
-    );
+    $("#generate").disabled = !attempts.isDurable();
+    if (attempts.isDurable()) {
+      showValidation(
+        true,
+        "Request is valid",
+        `${formatBytes(preview.estimated_request_bytes)} JSON payload. Generation is still blocked until explicit confirmation.`,
+      );
+    } else {
+      showValidation(
+        false,
+        "Billable actions are safely disabled",
+        "Enable browser session storage and reload so retry IDs can survive a lost response.",
+      );
+    }
   } catch (error) {
     state.validatedSignature = null;
     $("#generate").disabled = true;
@@ -426,13 +456,28 @@ async function reviewRequest() {
   }
 }
 
-function estimatedCost() {
-  const rate = $("#resolution").value === "2K" ? 0.8 : 0.5;
-  return rate * Number($("#duration").value);
+function mediaCounts(items = state.attached) {
+  return items.reduce((counts, item) => {
+    const kind = item.kind || item.type;
+    if (kind === "image") counts.imageCount += 1;
+    if (kind === "video") counts.videoCount += 1;
+    return counts;
+  }, { imageCount: 0, videoCount: 0 });
+}
+
+function currentGenerationCharges() {
+  return generationCharges({
+    resolution: $("#resolution").value,
+    duration: Number($("#duration").value),
+    ...mediaCounts(),
+  });
 }
 
 function updateCost() {
-  $("#cost-inline").textContent = `from ¥${estimatedCost().toFixed(2)}`;
+  const charges = currentGenerationCharges();
+  $("#cost-inline").textContent = charges.videoCount
+    ? `known ¥${charges.knownCost.toFixed(2)} + input video`
+    : `¥${charges.knownCost.toFixed(2)}`;
 }
 
 function confirmOperation({ title, description, summary = [], label, accent = "Confirm" }) {
@@ -445,6 +490,7 @@ function confirmOperation({ title, description, summary = [], label, accent = "C
   submit.textContent = accent;
   check.checked = false;
   submit.disabled = true;
+  dialog.returnValue = "cancel";
   const summaryNode = $("#confirm-summary");
   summaryNode.replaceChildren();
   for (const item of summary) {
@@ -458,12 +504,18 @@ function confirmOperation({ title, description, summary = [], label, accent = "C
   }
   return new Promise((resolve) => {
     const onChange = () => { submit.disabled = !check.checked; };
+    const onCancel = (event) => {
+      event.preventDefault();
+      dialog.close("cancel");
+    };
     const onClose = () => {
       check.removeEventListener("change", onChange);
+      dialog.removeEventListener("cancel", onCancel);
       dialog.removeEventListener("close", onClose);
       resolve(dialog.returnValue === "default" && check.checked);
     };
     check.addEventListener("change", onChange);
+    dialog.addEventListener("cancel", onCancel);
     dialog.addEventListener("close", onClose);
     dialog.showModal();
   });
@@ -471,21 +523,23 @@ function confirmOperation({ title, description, summary = [], label, accent = "C
 
 async function generateVideo() {
   if (state.submitting) return;
+  if (!requireDurableAttemptLedger()) return;
   if (state.validatedSignature !== composerSignature()) {
     toast("Review the current request before generating.", true);
     return;
   }
   const duration = Number($("#duration").value);
   const resolution = $("#resolution").value;
+  const charges = currentGenerationCharges();
   const confirmed = await confirmOperation({
     title: "Add this job to the pool?",
-    description: "This creates a new MiniMax task. Every existing active task continues running; nothing is replaced or cancelled.",
+    description: `This creates a new MiniMax task; existing tasks continue. Published input pricing is added to the output: the first five images are free, then ¥0.20 each; each input-video second costs ¥${charges.inputVideoRate.toFixed(2)} at ${resolution}. Audio is free. Video durations are not inspected here, so the displayed subtotal may not be final.`,
     summary: [
-      { value: resolution, label: "Resolution" },
-      { value: `${duration}s`, label: "Duration" },
-      { value: `¥${estimatedCost().toFixed(2)}+`, label: "Published base" },
+      { value: `¥${charges.outputCost.toFixed(2)}`, label: `Output · ${duration}s at ¥${charges.outputRate.toFixed(2)}/s` },
+      { value: `¥${charges.excessImageCost.toFixed(2)}`, label: `${charges.excessImageCount} images beyond five` },
+      { value: charges.videoCount ? `${charges.videoCount} · duration unmeasured` : "None", label: `Input video · ¥${charges.inputVideoRate.toFixed(2)}/s` },
     ],
-    label: "I understand this is billable and creates one additional active task.",
+    label: "I understand the output and input charges and want one additional active task.",
     accent: "Generate & add",
   });
   if (!confirmed) return;
@@ -494,11 +548,13 @@ async function generateVideo() {
   state.submitting = true;
   setBusy(button, true, "Submitting once…");
   try {
-    const requestId = `generation-${crypto.randomUUID()}`;
+    const requestId = attempts.generation();
+    if (!requireDurableAttemptLedger()) return;
     const result = await api("/api/jobs", {
       method: "POST",
       body: buildGeneration(true, requestId),
     });
+    attempts.markSucceeded("generation");
     toast(`Task ${result.task_id} joined the active pool.`);
     state.jobFilter = "active";
     setActiveJobFilter("active");
@@ -508,11 +564,13 @@ async function generateVideo() {
   } finally {
     state.submitting = false;
     setBusy(button, false);
-    button.disabled = state.validatedSignature !== composerSignature();
+    button.disabled = !attempts.isDurable()
+      || state.validatedSignature !== composerSignature();
   }
 }
 
 async function createContextIR() {
+  if (!requireDurableAttemptLedger()) return;
   const button = $("#context-ir");
   setBusy(button, true, "Validating…");
   try {
@@ -529,16 +587,21 @@ async function createContextIR() {
       accent: "Create IR task",
     });
     if (!confirmed) return;
+    const requestId = attempts.context();
+    if (!requireDurableAttemptLedger()) return;
     const result = await api("/api/context-ir", {
       method: "POST",
-      body: buildContextIR(true, `context-ir-${crypto.randomUUID()}`),
+      body: buildContextIR(true, requestId),
     });
+    attempts.markSucceeded("context-ir");
     toast(`Context IR task ${result.task_id} joined the pool.`);
+    setActiveJobFilter("active");
     await loadJobs();
   } catch (error) {
     toast(error.message, true);
   } finally {
     setBusy(button, false);
+    button.disabled = !attempts.isDurable();
   }
 }
 
@@ -577,7 +640,7 @@ async function publishAsset(asset) {
     });
     toast("Input uploaded. Future requests can use its compact mm_file reference.");
     await loadAssets();
-    invalidatePreview();
+    invalidatePreview({ rotateAttempt: false });
   } catch (error) {
     toast(error.message, true);
   }
@@ -620,7 +683,9 @@ function jobSettings(job) {
 function setActiveJobFilter(filter) {
   state.jobFilter = filter;
   $$("#job-filters button").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.status === filter);
+    const selected = button.dataset.status === filter;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", String(selected));
   });
   renderJobs();
 }
@@ -707,7 +772,22 @@ function renderJobs() {
         actions.append(makeButton("Save MP4", "micro-button", () => saveOutput(job)));
       }
       if (settings.resolution === "768P" && job.operation === "generation") {
-        actions.append(makeButton("Regenerate 2K", "micro-button", () => regenerateJob(job)));
+        const sourceDuration = Number(settings.duration);
+        const durationKnown = Number.isInteger(sourceDuration)
+          && sourceDuration >= 4
+          && sourceDuration <= 15;
+        const regenerate = makeButton(
+          durationKnown ? "Regenerate 2K" : "Duration required",
+          "micro-button",
+          () => regenerateJob(job),
+          !durationKnown || !attempts.isDurable(),
+        );
+        if (!durationKnown) {
+          regenerate.title = "Refresh this task until MiniMax supplies its 4–15 second duration";
+        } else if (!attempts.isDurable()) {
+          regenerate.title = "Enable browser session storage and reload before billable actions";
+        }
+        actions.append(regenerate);
       }
       actions.append(
         makeButton("Delete remote record", "micro-button is-danger", () => remoteTaskAction(job)),
@@ -727,32 +807,55 @@ function renderJobs() {
   }
 }
 
-async function refreshJob(taskId, quiet = false) {
-  if (state.pollInFlight.has(taskId)) return;
-  state.pollInFlight.add(taskId);
+async function requestJobRefresh(taskId, quiet = false) {
   try {
-    await api(`/api/jobs/${encodeURIComponent(taskId)}/refresh`, { method: "POST" });
+    const force = quiet ? "" : "?force=true";
+    const result = await api(`/api/jobs/${encodeURIComponent(taskId)}/refresh${force}`, {
+      method: "POST",
+    });
+    const current = state.jobs.find((job) => job.task_id === taskId);
+    const changed = taskPresentationChanged(current, result);
+    if (!quiet && changed) await loadJobs();
     if (!quiet) toast(`Task ${taskId} refreshed.`);
-    return true;
+    return changed;
   } catch (error) {
     if (!quiet) toast(error.message, true);
     const retry = Number(error.detail?.retry_after || error.detail?.detail?.retry_after || 0);
     state.nextPollAt.set(taskId, Date.now() + Math.max(15, retry || 15) * 1000);
     return false;
+  }
+}
+
+async function refreshJob(taskId, quiet = false) {
+  if (state.pollInFlight.has(taskId)) return false;
+  state.pollInFlight.add(taskId);
+  try {
+    return await requestJobRefresh(taskId, quiet);
   } finally {
     state.pollInFlight.delete(taskId);
   }
 }
 
 async function pollActiveJobs() {
-  if (!state.polling || document.hidden) return;
-  const now = Date.now();
-  const active = state.jobs.filter(
-    (job) => ACTIVE_STATUSES.has(job.status) && (state.nextPollAt.get(job.task_id) || 0) <= now,
-  );
-  if (!active.length) return;
-  const results = await Promise.all(active.map((job) => refreshJob(job.task_id, true)));
-  if (results.some(Boolean)) await loadJobs();
+  const changed = await pollActiveTaskPool({
+    jobs: state.jobs,
+    enabled: state.polling,
+    hidden: document.hidden,
+    nextPollAt: state.nextPollAt,
+    inFlight: state.pollInFlight,
+    cycle: state.pollCycle,
+    refresh: (taskId) => requestJobRefresh(taskId, true),
+    concurrency: 4,
+    maxTasksPerCycle: 8,
+    pollIntervalMs: 8000,
+  });
+  if (changed) await loadJobs();
+}
+
+function updatePollingStatus(enabled) {
+  const row = $(".polling-row");
+  row.classList.toggle("is-paused", !enabled);
+  $("#polling-copy").textContent = enabled ? "Polling every 8 seconds" : "Polling paused";
 }
 
 async function syncProviderTasks() {
@@ -760,7 +863,9 @@ async function syncProviderTasks() {
   button.classList.add("is-spinning");
   button.disabled = true;
   try {
-    const result = await api("/api/provider/tasks?page_num=1&page_size=100");
+    const result = await api("/api/provider/tasks?page_num=1&page_size=100", {
+      method: "POST",
+    });
     await loadJobs();
     toast(`Synced ${result.items?.length || 0} recent MiniMax tasks into the local pool.`);
   } catch (error) {
@@ -834,25 +939,35 @@ async function saveOutput(job) {
 }
 
 async function regenerateJob(job) {
+  if (!requireDurableAttemptLedger()) return;
   const task = jobTask(job);
-  const duration = Number(task.duration || job.request?.duration || 4);
+  const duration = Number(task.duration || job.request?.duration);
+  if (!Number.isInteger(duration) || duration < 4 || duration > 15) {
+    toast("Regeneration is blocked until the source task reports its exact duration.", true);
+    return;
+  }
+  const originalContent = Array.isArray(job.request?.content) ? job.request.content : null;
+  const inputCounts = mediaCounts(originalContent || []);
+  const charges = regenerationCharges({ duration, ...inputCounts });
   const confirmed = await confirmOperation({
     title: "Add a 2K regeneration task?",
-    description: "This billed operation creates another task from the eligible 768P source. Source-task regeneration may require MiniMax whitelist access.",
+    description: "This creates another task from the eligible 768P source. MiniMax charges ¥0.30 per regenerated output second and re-bills the original task inputs: first five images free, then ¥0.15 each; input video ¥0.30 per second; audio free. Source-task regeneration may require whitelist access.",
     summary: [
-      { value: "768P → 2K", label: "Operation" },
-      { value: `${duration}s`, label: "Source duration" },
-      { value: `¥${(duration * 0.8).toFixed(2)}+`, label: "Published base" },
+      { value: `¥${charges.outputCost.toFixed(2)}`, label: `Output · ${duration}s at ¥0.30/s` },
+      { value: originalContent ? `¥${charges.excessImageCost.toFixed(2)}` : "Unknown", label: originalContent ? `${charges.excessImageCount} original images beyond five` : "Original image charges" },
+      { value: originalContent ? (charges.videoCount ? `${charges.videoCount} · duration unmeasured` : "None") : "Unknown", label: "Original video · ¥0.30/s" },
     ],
-    label: "I understand this creates an additional billed regeneration task.",
+    label: "I understand the regeneration output and re-billed input charges.",
     accent: "Regenerate in 2K",
   });
   if (!confirmed) return;
   try {
+    const requestId = attempts.regeneration(job.task_id);
+    if (!requireDurableAttemptLedger()) return;
     const result = await api("/api/regenerations", {
       method: "POST",
       body: {
-        client_request_id: `regeneration-${crypto.randomUUID()}`,
+        client_request_id: requestId,
         model: "MiniMax-H3",
         source_task_id: job.task_id,
         resolution: "2K",
@@ -860,6 +975,7 @@ async function regenerateJob(job) {
         confirmed: true,
       },
     });
+    attempts.markSucceeded("regeneration", job.task_id);
     toast(`Regeneration task ${result.task_id} joined the active pool.`);
     setActiveJobFilter("active");
     await loadJobs();
@@ -931,7 +1047,11 @@ function setupEvents() {
   $$("#asset-filters button").forEach((button) => {
     button.addEventListener("click", () => {
       state.assetKind = button.dataset.kind;
-      $$("#asset-filters button").forEach((item) => item.classList.toggle("is-active", item === button));
+      $$("#asset-filters button").forEach((item) => {
+        const selected = item === button;
+        item.classList.toggle("is-active", selected);
+        item.setAttribute("aria-pressed", String(selected));
+      });
       renderAssets();
     });
   });
@@ -950,8 +1070,12 @@ function setupEvents() {
     });
   }
   dropZone.addEventListener("drop", (event) => uploadFiles([...event.dataTransfer.files]));
+  dropZone.addEventListener("click", () => $("#file-input").click());
   dropZone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") $("#file-input").click();
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      $("#file-input").click();
+    }
   });
 
   $("#prompt").addEventListener("input", () => {
@@ -978,7 +1102,7 @@ function setupEvents() {
   $("#sync-tasks").addEventListener("click", syncProviderTasks);
   $("#polling-toggle").addEventListener("change", (event) => {
     state.polling = event.target.checked;
-    $(".polling-row > span").style.opacity = state.polling ? "1" : "0.45";
+    updatePollingStatus(state.polling);
   });
   $$("#job-filters button").forEach((button) => {
     button.addEventListener("click", () => setActiveJobFilter(button.dataset.status));
@@ -997,7 +1121,17 @@ async function init() {
   setupEvents();
   updatePromptCount();
   updateCost();
+  state.polling = $("#polling-toggle").checked;
+  updatePollingStatus(state.polling);
   renderAttached();
+  if (!attempts.isDurable()) {
+    $("#context-ir").disabled = true;
+    $("#context-ir").title = "Enable browser session storage and reload before billable actions";
+    toast(
+      "Billable task creation is disabled: browser session storage is unavailable.",
+      true,
+    );
+  }
   await Promise.allSettled([loadHealth(), loadAssets(), loadJobs()]);
   window.setInterval(pollActiveJobs, 8000);
 }

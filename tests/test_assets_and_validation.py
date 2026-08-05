@@ -143,3 +143,23 @@ async def test_cross_origin_mutation_is_rejected(make_client) -> None:
         json={"name": "Blocked", "text": "Should not be stored"},
     )
     assert response.status_code == 403
+
+
+async def test_dns_rebinding_host_is_rejected(make_client) -> None:
+    client = make_client(no_upstream)
+    response = await client.get("/api/health", headers={"Host": "attacker.example"})
+    assert response.status_code == 400
+
+
+async def test_alternate_loopback_origin_and_port_are_rejected(make_client) -> None:
+    client = make_client(no_upstream)
+    alias = await client.get("/api/health", headers={"Host": "localhost:8000"})
+    wrong_port = await client.get("/api/health", headers={"Host": "127.0.0.1:8001"})
+    assert alias.status_code == 400
+    assert wrong_port.status_code == 400
+
+
+async def test_non_loopback_client_is_rejected_even_with_spoofed_host(make_client) -> None:
+    client = make_client(no_upstream, client_address=("203.0.113.10", 4321))
+    response = await client.get("/api/health", headers={"Host": "127.0.0.1"})
+    assert response.status_code == 403

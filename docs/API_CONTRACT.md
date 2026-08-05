@@ -14,6 +14,19 @@ All provider requests use `https://api.minimaxi.com` and server-side Bearer auth
 The browser has only purpose-built local `/api/*` routes and cannot choose an upstream host, path,
 method, header, or key.
 
+The browser persists only opaque billable-attempt IDs in per-tab session storage so a reload after
+a lost response reuses the backend ledger entry without another tab overwriting it. Billable task
+creation fails closed if storage cannot be verified. The server accepts one exact configured
+loopback origin, preventing origin aliases or ports from splitting that storage boundary.
+
+Ambiguous provider outcomes remain blocked for reconciliation; only an explicit allowlist of
+definite client rejections can retry without changing the ID. Provider acceptance and additive-pool
+membership commit in one SQLite transaction. Active-task polling is serialized, concurrency-capped,
+request-budgeted, and least-recently-polled in the browser; the server coalesces same-task reads,
+limits poll starts across tabs, and applies `Retry-After` globally.
+The local pool-sync route is a same-origin `POST /api/provider/tasks`, even though its upstream
+operation is read-only, because a successful sync persists provider tasks into local history.
+
 ## Implemented lifecycle
 
 | User operation | MiniMax operation | Spend/mutation guard |
@@ -33,6 +46,28 @@ The provider statuses are `queued`, `running`, `succeeded`, `failed`, and `cance
 `queued` task may be cancelled. A `running` task cannot be killed through the documented API.
 Succeed/failed task records may be deleted. H3 Studio never cancels an old task when a new one is
 submitted: active tasks form an additive pool.
+
+MiniMax task queries cover the most recent seven days. A local queued/running record older than
+that window that receives a provider invalid/not-found response becomes local status `unavailable`.
+It leaves the polling pool and can be removed from local history; H3 Studio does not represent that
+transition as a remote cancellation or deletion.
+
+## Pricing shown before billable calls
+
+The confirmation copy follows the public [MiniMax pay-as-you-go pricing](https://platform.minimaxi.com/docs/guides/pricing-paygo):
+
+- H3 output: ¥0.50/second at 768P or ¥0.80/second at 2K.
+- Generation inputs: audio free; first five images free, then ¥0.20/image; input video charged per
+  input second at the selected output-resolution rate.
+- 768P→2K regeneration output: ¥0.30/second.
+- Regeneration re-bills original inputs: audio free; first five images free, then ¥0.15/image;
+  input video ¥0.30/input second.
+
+H3 Studio can count images but does not pretend to know every local or remote input-video duration.
+It therefore labels the calculated output/image subtotal and explicitly identifies unestimated
+input-video charges instead of presenting that subtotal as a final price.
+Regeneration from a synced task is disabled until MiniMax supplies the exact 4–15 second source
+duration; the UI never substitutes a cheaper default duration.
 
 ## Request rules enforced before submission
 

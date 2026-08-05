@@ -15,7 +15,10 @@ from app.provider import MiniMaxClient
 async def make_client(tmp_path: Path) -> Callable:
     clients: list[httpx.AsyncClient] = []
 
-    def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
+    def factory(
+        handler: Callable[[httpx.Request], httpx.Response],
+        client_address: tuple[str, int] = ("127.0.0.1", 123),
+    ) -> httpx.AsyncClient:
         settings = Settings(
             project_root=tmp_path,
             data_dir=tmp_path / "data",
@@ -25,8 +28,8 @@ async def make_client(tmp_path: Path) -> Callable:
         provider = MiniMaxClient(settings, transport=httpx.MockTransport(handler))
         app = create_app(settings, provider)
         client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
+            transport=httpx.ASGITransport(app=app, client=client_address),
+            base_url="http://127.0.0.1:8000",
         )
         clients.append(client)
         return client

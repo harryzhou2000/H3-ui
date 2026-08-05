@@ -23,3 +23,23 @@ def test_env_and_runtime_data_are_ignored() -> None:
     assert ".venv/" in ignore
     assert "data/assets/*" in ignore
     assert "data/downloads/*" in ignore
+
+
+def test_explicit_confirmation_cannot_inherit_an_earlier_dialog_approval() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'dialog.returnValue = "cancel"' in browser_source
+    assert 'dialog.addEventListener("cancel", onCancel)' in browser_source
+    assert 'dialog.close("cancel")' in browser_source
+
+
+def test_billable_actions_fail_closed_without_durable_retry_ids() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "requireDurableAttemptLedger" in browser_source
+    assert "browser session storage is unavailable" in browser_source
+
+
+def test_regeneration_never_invents_a_missing_source_duration() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "job.request?.duration || 4" not in browser_source
+    assert "Duration required" in browser_source
+    assert "blocked until the source task reports its exact duration" in browser_source

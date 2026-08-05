@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any
 
 
+ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
+TERMINAL_JOB_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "deleted", "unavailable"}
+)
+JOB_STATUSES = ACTIVE_JOB_STATUSES | TERMINAL_JOB_STATUSES
+
+
 class StudioStore:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
@@ -145,32 +152,52 @@ class StudioStore:
         status: str,
         request: dict[str, Any] | None = None,
         response: dict[str, Any] | None = None,
+        created_at: int | None = None,
+        *,
+        force_status: bool = False,
     ) -> dict[str, Any]:
+        if status not in JOB_STATUSES:
+            raise ValueError(f"Unsupported local job status: {status}")
         now = int(time.time())
-        existing = self.get_job(task_id)
-        created_at = existing["created_at"] if existing else now
-        request_value = request if request is not None else (existing or {}).get("request")
-        response_value = response if response is not None else (existing or {}).get("response")
-        operation_value = operation or (existing or {}).get("operation", "generation")
+        created_at_value = created_at or now
+        request_json = json.dumps(request) if request is not None else None
+        response_json = json.dumps(response) if response is not None else None
+        preserve_existing = """
+            jobs.status IN ('succeeded', 'failed', 'cancelled', 'deleted', 'unavailable')
+            OR (jobs.status = 'running' AND excluded.status = 'queued')
+        """
         with self._connect() as db:
             db.execute(
-                """
+                f"""
                 INSERT INTO jobs (
                     task_id, operation, status, request_json, response_json,
                     created_at, updated_at, downloaded_filename
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     operation = excluded.operation,
-                    status = excluded.status,
-                    request_json = excluded.request_json,
-                    response_json = excluded.response_json,
+                    status = CASE
+                        WHEN ? THEN excluded.status
+                        WHEN {preserve_existing} THEN jobs.status
+                        ELSE excluded.status
+                    END,
+                    request_json = COALESCE(excluded.request_json, jobs.request_json),
+                    response_json = CASE
+                        WHEN NOT ? AND ({preserve_existing}) THEN jobs.response_json
+                        ELSE COALESCE(excluded.response_json, jobs.response_json)
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (
-                    task_id, operation_value, status,
-                    json.dumps(request_value) if request_value is not None else None,
-                    json.dumps(response_value) if response_value is not None else None,
-                    created_at, now, (existing or {}).get("downloaded_filename"),
+                    task_id,
+                    operation or "generation",
+                    status,
+                    request_json,
+                    response_json,
+                    created_at_value,
+                    now,
+                    None,
+                    force_status,
+                    force_status,
                 ),
             )
         return self.get_job(task_id)  # type: ignore[return-value]
@@ -186,12 +213,27 @@ class StudioStore:
         with self._connect() as db:
             db.execute("DELETE FROM jobs WHERE task_id = ?", (task_id,))
 
+    @staticmethod
+    def _submission(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["request"] = json.loads(data.pop("request_json"))
+        data["error"] = json.loads(data.pop("error_json")) if data["error_json"] else None
+        return data
+
     def begin_submission(
         self, client_request_id: str, operation: str, request: dict[str, Any]
     ) -> tuple[bool, dict[str, Any]]:
         now = int(time.time())
-        try:
-            with self._connect() as db:
+        request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
+        with self._connect() as db:
+            # Serialize the read/transition so only one caller can reopen a
+            # definitely rejected submission for a retry.
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM submissions WHERE client_request_id = ?",
+                (client_request_id,),
+            ).fetchone()
+            if row is None:
                 db.execute(
                     """
                     INSERT INTO submissions (
@@ -199,11 +241,34 @@ class StudioStore:
                         request_json, error_json, created_at, updated_at
                     ) VALUES (?, ?, 'submitting', NULL, ?, NULL, ?, ?)
                     """,
-                    (client_request_id, operation, json.dumps(request), now, now),
+                    (client_request_id, operation, request_json, now, now),
                 )
-        except sqlite3.IntegrityError:
-            return False, self.get_submission(client_request_id)  # type: ignore[arg-type]
-        return True, self.get_submission(client_request_id)  # type: ignore[arg-type]
+                started = True
+            else:
+                existing = self._submission(row)
+                same_intent = (
+                    existing["operation"] == operation and existing["request"] == request
+                )
+                if existing["status"] == "rejected" and same_intent:
+                    cursor = db.execute(
+                        """
+                        UPDATE submissions
+                        SET status = 'submitting', task_id = NULL, request_json = ?,
+                            error_json = NULL, updated_at = ?
+                        WHERE client_request_id = ? AND status = 'rejected'
+                        """,
+                        (request_json, now, client_request_id),
+                    )
+                    started = cursor.rowcount == 1
+                else:
+                    started = False
+            current = db.execute(
+                "SELECT * FROM submissions WHERE client_request_id = ?",
+                (client_request_id,),
+            ).fetchone()
+        if current is None:  # pragma: no cover - guarded by the transaction above
+            raise RuntimeError("Submission ledger entry disappeared")
+        return started, self._submission(current)
 
     def get_submission(self, client_request_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
@@ -213,21 +278,64 @@ class StudioStore:
             ).fetchone()
         if not row:
             return None
-        data = dict(row)
-        data["request"] = json.loads(data.pop("request_json"))
-        data["error"] = json.loads(data.pop("error_json")) if data["error_json"] else None
-        return data
+        return self._submission(row)
 
-    def finish_submission(self, client_request_id: str, task_id: str) -> None:
+    def finish_submission_with_job(
+        self,
+        client_request_id: str,
+        task_id: str,
+        operation: str,
+        request: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Commit provider acceptance and additive-pool membership atomically."""
+        now = int(time.time())
         with self._connect() as db:
-            db.execute(
+            db.execute("BEGIN IMMEDIATE")
+            submission = db.execute(
                 """
                 UPDATE submissions
                 SET status = 'submitted', task_id = ?, updated_at = ?
-                WHERE client_request_id = ?
+                WHERE client_request_id = ? AND status = 'submitting'
                 """,
-                (task_id, int(time.time()), client_request_id),
+                (task_id, now, client_request_id),
             )
+            if submission.rowcount != 1:
+                raise RuntimeError("Submission was not in a committable state")
+            db.execute(
+                """
+                INSERT INTO jobs (
+                    task_id, operation, status, request_json, response_json,
+                    created_at, updated_at, downloaded_filename
+                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, NULL)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    operation = excluded.operation,
+                    status = CASE
+                        WHEN jobs.status IN (
+                            'running', 'succeeded', 'failed', 'cancelled', 'deleted',
+                            'unavailable'
+                        ) THEN jobs.status
+                        ELSE excluded.status
+                    END,
+                    request_json = excluded.request_json,
+                    response_json = COALESCE(jobs.response_json, excluded.response_json),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    task_id,
+                    operation,
+                    json.dumps(request),
+                    json.dumps(response),
+                    now,
+                    now,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        if row is None:  # pragma: no cover - transaction guarantees the row
+            raise RuntimeError("Submitted task was not added to the active pool")
+        return self._job(row)
 
     def fail_submission(
         self, client_request_id: str, status: str, error: dict[str, Any]

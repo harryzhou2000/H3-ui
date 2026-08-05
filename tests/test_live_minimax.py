@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from app.config import Settings
+from app.config import OFFICIAL_MINIMAX_API_BASE_URL, Settings
 from app.provider import MiniMaxClient
 
 
@@ -16,5 +16,6 @@ from app.provider import MiniMaxClient
 async def test_live_read_only_task_list_contract() -> None:
     settings = Settings.from_env()
     assert settings.api_key_configured, "MINIMAX_API_KEY is required"
+    assert settings.api_base_url == OFFICIAL_MINIMAX_API_BASE_URL
     # The client validates only {items: list, total: int}; task data is discarded.
     await MiniMaxClient(settings).test_connection()

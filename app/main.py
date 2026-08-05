@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import copy
+import ipaddress
 import re
 import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urlparse
@@ -43,6 +46,16 @@ TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SAFE_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 RANGE_PATTERN = re.compile(r"^bytes=(\d*)-(\d*)$")
 ACTIVE_STATUSES = {"queued", "running"}
+PROVIDER_TASK_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
+DEFINITE_REJECTION_HTTP_CODES = {400, 401, 402, 403, 422, 429}
+PROVIDER_TASK_RETENTION_SECONDS = 7 * 24 * 60 * 60
+POLL_CACHE_SECONDS = 7.5
+POLL_START_INTERVAL_SECONDS = 0.25
+AMBIGUOUS_SUBMISSION_ERROR_TYPES = {
+    "invalid_upstream_response",
+    "upstream_connection_error",
+    "upstream_timeout",
+}
 
 
 def _task_id(value: str) -> str:
@@ -65,6 +78,36 @@ def _sanitize_provider_response(body: dict[str, Any]) -> dict[str, Any]:
             content.pop("url", None)
             content["output_available"] = True
     return safe
+
+
+def _validated_provider_task(
+    task: Any,
+    *,
+    expected_task_id: str | None = None,
+) -> tuple[str, str]:
+    if not isinstance(task, dict):
+        raise ProviderError(
+            502,
+            "MiniMax query response did not include a task",
+            error_type="invalid_upstream_response",
+        )
+    task_id = str(task.get("id") or "")
+    if not TASK_ID_PATTERN.fullmatch(task_id) or (
+        expected_task_id is not None and task_id != expected_task_id
+    ):
+        raise ProviderError(
+            502,
+            "MiniMax task response included an invalid task ID",
+            error_type="invalid_upstream_response",
+        )
+    status = task.get("status")
+    if not isinstance(status, str) or status not in PROVIDER_TASK_STATUSES:
+        raise ProviderError(
+            502,
+            "MiniMax task response included an invalid status",
+            error_type="invalid_upstream_response",
+        )
+    return task_id, status
 
 
 def _stream_local_file(
@@ -130,7 +173,7 @@ def _stream_local_file(
 
 def _submission_error(existing: dict[str, Any]) -> HTTPException:
     status = existing.get("status")
-    if status == "submission_unknown":
+    if status in {"submission_unknown", "submitting"}:
         message = (
             "This request may already have reached MiniMax. Refresh the recent task list "
             "and reconcile it before creating another request."
@@ -147,11 +190,68 @@ def _submission_error(existing: dict[str, Any]) -> HTTPException:
     )
 
 
+def _submission_intent_error(existing: dict[str, Any]) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "message": (
+                "This client request ID is already reserved for a different "
+                "operation or request"
+            ),
+            "submission_status": existing.get("status"),
+            "existing_operation": existing.get("operation"),
+        },
+    )
+
+
+def _is_definite_client_rejection(exc: ProviderError) -> bool:
+    """Retry only documented client rejections; unknown 4xx outcomes fail closed."""
+    return (
+        exc.status_code in DEFINITE_REJECTION_HTTP_CODES
+        and exc.error_type not in AMBIGUOUS_SUBMISSION_ERROR_TYPES
+    )
+
+
+def _canonical_host_header(settings: Settings) -> str:
+    host = settings.host.lower()
+    rendered_host = f"[{host}]" if ":" in host else host
+    if settings.port == 80:
+        return rendered_host
+    return f"{rendered_host}:{settings.port}"
+
+
+def _retry_after_seconds(value: str | None, default: float = 15.0) -> float:
+    if not value:
+        return default
+    try:
+        return max(1.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return max(1.0, retry_at - time.time())
+
+
+def _provider_created_at(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if timestamp <= 0:
+        return None
+    return min(timestamp, int(time.time()))
+
+
 def create_app(
     settings: Settings | None = None,
     provider: MiniMaxClient | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    if settings.host.lower() not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("H3 Studio only accepts a configured loopback host")
     settings.prepare()
     store = StudioStore(settings.database_path)
     store.initialize()
@@ -169,9 +269,57 @@ def create_app(
     app.state.store = store
     app.state.media = media
     app.state.provider = provider
+    app.state.poll_task_locks = {}
+    app.state.poll_semaphore = asyncio.Semaphore(4)
+    app.state.poll_rate_lock = asyncio.Lock()
+    app.state.poll_next_start = 0.0
+    app.state.poll_backoff_until = 0.0
+    app.state.poll_cache = {}
+    canonical_host_header = _canonical_host_header(settings)
+
+    def task_lock(task_id: str) -> asyncio.Lock:
+        return app.state.poll_task_locks.setdefault(task_id, asyncio.Lock())
+
+    def enforce_poll_backoff() -> None:
+        remaining = app.state.poll_backoff_until - time.monotonic()
+        if remaining > 0:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": "MiniMax polling is globally backed off",
+                    "retry_after": max(1, int(remaining) + 1),
+                },
+            )
+
+    async def wait_for_poll_rate_slot() -> None:
+        async with app.state.poll_rate_lock:
+            delay = app.state.poll_next_start - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            app.state.poll_next_start = (
+                time.monotonic() + POLL_START_INTERVAL_SECONDS
+            )
+
+    def note_provider_backoff(exc: ProviderError) -> None:
+        if exc.status_code != 429:
+            return
+        retry_seconds = _retry_after_seconds(exc.retry_after)
+        app.state.poll_backoff_until = max(
+            app.state.poll_backoff_until,
+            time.monotonic() + retry_seconds,
+        )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Callable[[Request], Awaitable[Any]]):
+        try:
+            client_address = ipaddress.ip_address(request.client.host if request.client else "")
+        except ValueError:
+            return JSONResponse(status_code=403, content={"detail": "Loopback access only"})
+        if not client_address.is_loopback:
+            return JSONResponse(status_code=403, content={"detail": "Loopback access only"})
+        host_header = request.headers.get("host", "").lower()
+        if host_header != canonical_host_header:
+            return JSONResponse(status_code=400, content={"detail": "Host not allowed"})
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             origin = request.headers.get("Origin")
             if origin:
@@ -341,17 +489,33 @@ def create_app(
             client_request_id, operation, request_snapshot
         )
         if not started:
+            same_intent = (
+                existing.get("operation") == operation
+                and existing.get("request") == request_snapshot
+            )
+            if not same_intent:
+                raise _submission_intent_error(existing)
             if existing.get("status") == "submitted" and existing.get("task_id"):
                 job = store.get_job(existing["task_id"])
+                if job is None:
+                    replay_snapshot = dict(existing.get("request") or {})
+                    replay_snapshot.pop("confirmed", None)
+                    job = store.upsert_job(
+                        existing["task_id"],
+                        str(existing.get("operation") or operation),
+                        "queued",
+                        request=replay_snapshot,
+                        response={"task_id": existing["task_id"]},
+                    )
                 return {"task_id": existing["task_id"], "job": job, "replayed": True}
             raise _submission_error(existing)
         try:
             result = await upstream(payload)
         except ProviderError as exc:
-            unknown = exc.error_type in {"upstream_timeout", "upstream_connection_error"}
+            definite_rejection = _is_definite_client_rejection(exc)
             store.fail_submission(
                 client_request_id,
-                "submission_unknown" if unknown else "rejected",
+                "rejected" if definite_rejection else "submission_unknown",
                 exc.public_detail(),
             )
             raise
@@ -363,11 +527,14 @@ def create_app(
                 {"message": "MiniMax response did not include a valid task_id"},
             )
             raise ProviderError(502, "MiniMax response did not include a valid task_id")
-        store.finish_submission(client_request_id, task_id)
         safe_snapshot = dict(request_snapshot)
         safe_snapshot.pop("confirmed", None)
-        job = store.upsert_job(
-            task_id, operation, "queued", request=safe_snapshot, response={"task_id": task_id}
+        job = store.finish_submission_with_job(
+            client_request_id,
+            task_id,
+            operation,
+            safe_snapshot,
+            {"task_id": task_id},
         )
         return {"task_id": task_id, "job": job, "replayed": False}
 
@@ -432,7 +599,17 @@ def create_app(
     async def list_local_jobs() -> list[dict[str, Any]]:
         return store.list_jobs()
 
-    @app.get("/api/provider/tasks")
+    @app.get("/api/provider/tasks", include_in_schema=False)
+    async def reject_provider_tasks_get() -> None:
+        # The root static-files mount would otherwise consume this wrong-method
+        # request instead of FastAPI returning a prompt API-level rejection.
+        raise HTTPException(
+            status_code=405,
+            detail="Provider task sync requires POST",
+            headers={"Allow": "POST"},
+        )
+
+    @app.post("/api/provider/tasks")
     async def list_provider_tasks(
         page_num: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
@@ -446,76 +623,200 @@ def create_app(
             task_type=task_type,
         )
         safe = _sanitize_provider_response(result)
-        for task in safe.get("items", []):
-            if not isinstance(task, dict) or not task.get("id"):
-                continue
-            store.upsert_job(
-                str(task["id"]),
-                str(task.get("task_type") or "generation"),
-                str(task.get("status") or "unknown"),
-                response={"task": task},
+        items = safe.get("items")
+        if not isinstance(items, list):
+            raise ProviderError(
+                502,
+                "MiniMax task-list response did not include items",
+                error_type="invalid_upstream_response",
             )
+        validated: list[tuple[dict[str, Any], str, str]] = []
+        for task in items:
+            task_id, task_status = _validated_provider_task(task)
+            validated.append((task, task_id, task_status))
+        for task, task_id, task_status in validated:
+            async with task_lock(task_id):
+                store.upsert_job(
+                    task_id,
+                    str(task.get("task_type") or "generation"),
+                    task_status,
+                    response={"task": task},
+                    created_at=_provider_created_at(task.get("created_at")),
+                )
         return safe
 
     @app.post("/api/jobs/{task_id}/refresh")
-    async def refresh_job(task_id: str) -> dict[str, Any]:
+    async def refresh_job(
+        task_id: str,
+        force: bool = Query(default=False),
+    ) -> dict[str, Any]:
         task_id = _task_id(task_id)
-        result = await provider.get_task(task_id)
-        safe = _sanitize_provider_response(result)
-        task = safe.get("task")
-        if not isinstance(task, dict):
-            raise ProviderError(502, "MiniMax query response did not include task")
-        store.upsert_job(
-            task_id,
-            str(task.get("task_type") or "generation"),
-            str(task.get("status") or "unknown"),
-            response=safe,
-        )
-        return safe
+        request_started_at = time.monotonic()
+        async with task_lock(task_id):
+            cached = app.state.poll_cache.get(task_id)
+            if (
+                cached
+                and time.monotonic() - cached["at"] < POLL_CACHE_SECONDS
+                and (not force or cached["at"] >= request_started_at)
+            ):
+                if cached.get("error"):
+                    error = cached["error"]
+                    raise ProviderError(
+                        error["status_code"],
+                        error["message"],
+                        error_type=error["error_type"],
+                        request_id=error.get("request_id"),
+                        retry_after=error.get("retry_after"),
+                    )
+                return copy.deepcopy(cached["response"])
+
+            async with app.state.poll_semaphore:
+                enforce_poll_backoff()
+                await wait_for_poll_rate_slot()
+                enforce_poll_backoff()
+                try:
+                    result = await provider.get_task(task_id)
+                    safe = _sanitize_provider_response(result)
+                    task = safe.get("task")
+                    _, task_status = _validated_provider_task(
+                        task,
+                        expected_task_id=task_id,
+                    )
+                except ProviderError as exc:
+                    note_provider_backoff(exc)
+                    job = store.get_job(task_id)
+                    expired_active_job = (
+                        exc.status_code in {400, 404}
+                        and job is not None
+                        and job.get("status") in ACTIVE_STATUSES
+                        and int(job.get("created_at") or 0)
+                        <= int(time.time()) - PROVIDER_TASK_RETENTION_SECONDS
+                    )
+                    if not expired_active_job:
+                        app.state.poll_cache[task_id] = {
+                            "at": time.monotonic(),
+                            "error": {
+                                "status_code": exc.status_code,
+                                "message": exc.message,
+                                "error_type": exc.error_type,
+                                "request_id": exc.request_id,
+                                "retry_after": exc.retry_after,
+                            },
+                        }
+                        raise
+                    safe = {
+                        "task": {
+                            "id": task_id,
+                            "status": "unavailable",
+                            "task_type": job.get("operation") or "generation",
+                            "error": {
+                                "message": (
+                                    "MiniMax no longer exposes this task after its "
+                                    "seven-day query window"
+                                )
+                            },
+                        }
+                    }
+                    store.upsert_job(
+                        task_id,
+                        str(job.get("operation") or "generation"),
+                        "unavailable",
+                        response=safe,
+                    )
+                    app.state.poll_cache[task_id] = {
+                        "at": time.monotonic(),
+                        "response": safe,
+                    }
+                    return safe
+
+            store.upsert_job(
+                task_id,
+                str(task.get("task_type") or "generation"),
+                task_status,
+                response=safe,
+                created_at=_provider_created_at(task.get("created_at")),
+            )
+            app.state.poll_cache[task_id] = {
+                "at": time.monotonic(),
+                "response": safe,
+            }
+            return safe
 
     @app.delete("/api/jobs/{task_id}/remote")
     async def delete_remote_job(task_id: str, body: RemoteTaskDelete) -> dict[str, Any]:
         task_id = _task_id(task_id)
         if not body.confirmed:
             raise HTTPException(status_code=409, detail="Remote task action must be confirmed")
-        current = await provider.get_task(task_id)
-        task = current.get("task")
-        if not isinstance(task, dict):
-            raise ProviderError(502, "MiniMax query response did not include task")
-        current_status = str(task.get("status") or "")
-        if current_status != body.expected_status:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "Task status changed; review it before trying again",
-                    "expected": body.expected_status,
-                    "actual": current_status,
-                },
+        async with task_lock(task_id):
+            current = await provider.get_task(task_id)
+            task = current.get("task")
+            _, current_status = _validated_provider_task(
+                task,
+                expected_task_id=task_id,
             )
-        if current_status not in {"queued", "succeeded", "failed"}:
-            raise HTTPException(status_code=409, detail="Task cannot be cancelled or deleted now")
-        result = await provider.delete_task(task_id)
-        resulting_status = str(result.get("status") or result.get("action") or "deleted")
-        store.upsert_job(task_id, str(task.get("task_type") or "generation"), resulting_status)
-        return result
+            safe_current = _sanitize_provider_response(current)
+            store.upsert_job(
+                task_id,
+                str(task.get("task_type") or "generation"),
+                current_status,
+                response=safe_current,
+                created_at=_provider_created_at(task.get("created_at")),
+            )
+            app.state.poll_cache[task_id] = {
+                "at": time.monotonic(),
+                "response": safe_current,
+            }
+            if current_status != body.expected_status:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Task status changed; review it before trying again",
+                        "expected": body.expected_status,
+                        "actual": current_status,
+                    },
+                )
+            if current_status not in {"queued", "succeeded", "failed"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task cannot be cancelled or deleted now",
+                )
+            result = await provider.delete_task(task_id)
+            resulting_status = "cancelled" if current_status == "queued" else "deleted"
+            store.upsert_job(
+                task_id,
+                str(task.get("task_type") or "generation"),
+                resulting_status,
+                force_status=True,
+            )
+            app.state.poll_cache.pop(task_id, None)
+            return result
 
     @app.delete("/api/jobs/{task_id}/local")
     async def delete_local_job(task_id: str) -> dict[str, Any]:
         task_id = _task_id(task_id)
-        job = store.get_job(task_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="Local job not found")
-        store.delete_local_job(task_id)
-        return {"deleted": True, "scope": "local_history_only"}
+        async with task_lock(task_id):
+            job = store.get_job(task_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="Local job not found")
+            if job.get("status") in ACTIVE_STATUSES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Active tasks must remain visible in the pool. Kill a queued task "
+                        "explicitly, or wait until the task becomes terminal."
+                    ),
+                )
+            store.delete_local_job(task_id)
+            app.state.poll_cache.pop(task_id, None)
+            return {"deleted": True, "scope": "local_history_only"}
 
     @app.post("/api/jobs/{task_id}/download")
     async def save_result(task_id: str) -> dict[str, Any]:
         task_id = _task_id(task_id)
         raw = await provider.get_task(task_id)
         task = raw.get("task")
-        if not isinstance(task, dict):
-            raise ProviderError(502, "MiniMax query response did not include task")
-        if task.get("status") != "succeeded":
+        _, task_status = _validated_provider_task(task, expected_task_id=task_id)
+        if task_status != "succeeded":
             raise HTTPException(status_code=409, detail="Task has not succeeded")
         content = task.get("content")
         output_url = content.get("url") if isinstance(content, dict) else None
@@ -551,14 +852,11 @@ def create_app(
     return app
 
 
-app = create_app()
-
-
 def run() -> None:
     settings = Settings.from_env()
     if settings.host not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("H3 Studio only binds to a loopback host")
-    uvicorn.run(app, host=settings.host, port=settings.port, reload=False)
+    uvicorn.run(create_app(settings), host=settings.host, port=settings.port, reload=False)
 
 
 if __name__ == "__main__":

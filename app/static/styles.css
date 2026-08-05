@@ -925,6 +925,12 @@ button:disabled {
   font-size: 10px;
 }
 
+.polling-row.is-paused .live-pulse {
+  animation: none;
+  background: var(--muted);
+  box-shadow: none;
+}
+
 .live-pulse {
   display: inline-block;
   width: 7px;
@@ -995,7 +1001,8 @@ button:disabled {
 }
 
 .status-chip.failed,
-.status-chip.deleted {
+.status-chip.deleted,
+.status-chip.unavailable {
   color: var(--coral-dark);
   background: var(--coral-soft);
 }
@@ -1225,6 +1232,28 @@ button:disabled {
 
 @keyframes toast-in {
   from { transform: translateY(8px); opacity: 0; }
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--green);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button {
+    transition: none;
+  }
+
+  .live-pulse,
+  .icon-button.is-spinning,
+  .toast {
+    animation: none;
+  }
 }
 
 @media (max-width: 1280px) {
