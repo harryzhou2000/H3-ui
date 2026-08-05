@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-import httpx
+from io import BytesIO
 
+import httpx
+from PIL import Image
+
+from app.media import crop_image_to_ratio
 from tests.conftest import generation_request
 
 
 def no_upstream(request: httpx.Request) -> httpx.Response:
     raise AssertionError(f"Unexpected upstream request: {request.method} {request.url}")
+
+
+def png_bytes(size: tuple[int, int] = (40, 30)) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", size, (30, 90, 150)).save(output, format="PNG")
+    return output.getvalue()
 
 
 async def test_health_never_returns_secret(make_client) -> None:
@@ -39,6 +49,78 @@ async def test_text_and_remote_assets_are_organized_locally(make_client) -> None
     assert remote.status_code == 201
     assert remote.json()["source_type"] == "remote"
     assert len((await client.get("/api/assets")).json()) == 2
+
+
+async def test_every_asset_source_can_be_renamed(make_client) -> None:
+    client = make_client(no_upstream)
+    text = (
+        await client.post("/api/assets/text", json={"name": "Text", "text": "Prompt", "tags": []})
+    ).json()
+    remote = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "image", "name": "Remote", "url": "https://cdn.test/frame.png"},
+        )
+    ).json()
+    local = (
+        await client.post(
+            "/api/assets/upload",
+            files={"file": ("frame.png", png_bytes(), "image/png")},
+        )
+    ).json()
+
+    edits = (
+        {"name": "Renamed 1", "text": "Edited prompt body"},
+        {"name": "Renamed 2", "url": "mm_file://edited-file-id"},
+        {"name": "Renamed 3", "notes": "Local metadata", "tags": ["edited"]},
+    )
+    for asset, edit in zip((text, remote, local), edits, strict=True):
+        response = await client.patch(f"/api/assets/{asset['id']}", json=edit)
+        assert response.status_code == 200
+        assert response.json()["name"] == edit["name"]
+
+    assert {asset["name"] for asset in (await client.get("/api/assets")).json()} == {
+        "Renamed 1",
+        "Renamed 2",
+        "Renamed 3",
+    }
+    edited = {asset["name"]: asset for asset in (await client.get("/api/assets")).json()}
+    assert edited["Renamed 1"]["text"] == "Edited prompt body"
+    assert edited["Renamed 2"]["source_type"] == "mm_file"
+    assert edited["Renamed 2"]["source_url"] == "mm_file://edited-file-id"
+    assert edited["Renamed 3"]["notes"] == "Local metadata"
+    assert edited["Renamed 3"]["tags"] == ["edited"]
+
+
+async def test_asset_editor_rejects_value_edits_for_the_wrong_source_type(make_client) -> None:
+    client = make_client(no_upstream)
+    local = (
+        await client.post(
+            "/api/assets/upload",
+            files={"file": ("frame.png", png_bytes(), "image/png")},
+        )
+    ).json()
+    remote = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "image", "name": "Remote", "url": "https://cdn.test/frame.png"},
+        )
+    ).json()
+
+    local_url = await client.patch(
+        f"/api/assets/{local['id']}", json={"url": "https://cdn.test/replacement.png"}
+    )
+    remote_text = await client.patch(f"/api/assets/{remote['id']}", json={"text": "not an image"})
+    remote_private = await client.patch(
+        f"/api/assets/{remote['id']}", json={"url": "http://127.0.0.1/private.png"}
+    )
+
+    assert local_url.status_code == 422
+    assert "Only URL or file-ID assets" in local_url.text
+    assert remote_text.status_code == 422
+    assert "Only text-prompt assets" in remote_text.text
+    assert remote_private.status_code == 422
+    assert "private" in remote_private.text.lower()
 
 
 async def test_local_upload_and_content_round_trip(make_client) -> None:
@@ -86,16 +168,73 @@ async def test_text_only_adaptive_ratio_is_blocked(make_client) -> None:
     assert "concrete aspect ratio" in response.text
 
 
+def test_center_crop_preserves_pixels_and_reaches_requested_ratio(tmp_path) -> None:
+    source = tmp_path / "wide.png"
+    source.write_bytes(png_bytes((48, 30)))
+
+    cropped, mime = crop_image_to_ratio(source, "16:9")
+
+    with Image.open(BytesIO(cropped)) as image:
+        assert image.size == (48, 27)
+    assert mime == "image/png"
+
+
+async def test_concrete_frame_ratio_crops_local_image_and_keeps_provider_adaptive(
+    make_client,
+) -> None:
+    client = make_client(no_upstream)
+    frame = (
+        await client.post(
+            "/api/assets/upload",
+            files={"file": ("frame.png", png_bytes(), "image/png")},
+        )
+    ).json()
+    body = generation_request()
+    body["ratio"] = "16:9"
+    body["content"].append({"type": "image", "asset_id": frame["id"], "role": "first_frame"})
+
+    response = await client.post("/api/jobs/preview", json=body)
+
+    assert response.status_code == 200
+    payload = response.json()["payload"]
+    assert payload["ratio"] == "adaptive"
+    assert payload["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,<local data omitted>"
+    )
+
+
+async def test_forced_frame_crop_rejects_remote_images_without_fetching_them(make_client) -> None:
+    client = make_client(no_upstream)
+    frame = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "image", "name": "Remote", "url": "https://cdn.test/frame.png"},
+        )
+    ).json()
+    body = generation_request()
+    body["ratio"] = "1:1"
+    body["content"].append({"type": "image", "asset_id": frame["id"], "role": "first_frame"})
+
+    response = await client.post("/api/jobs/preview", json=body)
+
+    assert response.status_code == 422
+    assert "requires a local JPEG, PNG, or WebP" in response.text
+
+
 async def test_frame_and_reference_modes_cannot_mix(make_client) -> None:
     client = make_client(no_upstream)
-    first = (await client.post(
-        "/api/assets/remote",
-        json={"kind": "image", "name": "Frame", "url": "https://cdn.test/a.png"},
-    )).json()
-    video = (await client.post(
-        "/api/assets/remote",
-        json={"kind": "video", "name": "Motion", "url": "https://cdn.test/a.mp4"},
-    )).json()
+    first = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "image", "name": "Frame", "url": "https://cdn.test/a.png"},
+        )
+    ).json()
+    video = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "video", "name": "Motion", "url": "https://cdn.test/a.mp4"},
+        )
+    ).json()
     body = generation_request()
     body["ratio"] = "adaptive"
     body["content"].extend(
@@ -111,15 +250,15 @@ async def test_frame_and_reference_modes_cannot_mix(make_client) -> None:
 
 async def test_reference_audio_cannot_be_only_reference(make_client) -> None:
     client = make_client(no_upstream)
-    audio = (await client.post(
-        "/api/assets/remote",
-        json={"kind": "audio", "name": "Voice", "url": "https://cdn.test/voice.mp3"},
-    )).json()
+    audio = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "audio", "name": "Voice", "url": "https://cdn.test/voice.mp3"},
+        )
+    ).json()
     body = generation_request()
     body["ratio"] = "adaptive"
-    body["content"].append(
-        {"type": "audio", "asset_id": audio["id"], "role": "reference_audio"}
-    )
+    body["content"].append({"type": "audio", "asset_id": audio["id"], "role": "reference_audio"})
     response = await client.post("/api/jobs/preview", json=body)
     assert response.status_code == 422
     assert "cannot be the only reference" in response.text

@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi==0.116.1",
   "httpx[socks]==0.28.1",
+  "pillow>=12.3.0",
   "python-dotenv==1.1.1",
   "python-multipart==0.0.20",
   "uvicorn[standard]==0.35.0",
@@ -14,8 +15,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "detect-secrets>=1.5.0",
+  "pre-commit>=4.6.1",
+  "pre-commit-hooks>=6.0.0",
   "pytest==8.4.1",
   "pytest-asyncio==1.1.0",
+  "ruff>=0.16.1",
 ]
 
 [tool.pytest.ini_options]
@@ -26,3 +31,11 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+  "B008", # FastAPI intentionally constructs dependency markers in signatures.
+  "E501", # Ruff's formatter intentionally leaves some long strings intact.
+  "UP042", # Pydantic contracts intentionally retain str/Enum compatibility.
+]

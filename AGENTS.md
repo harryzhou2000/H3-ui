@@ -34,6 +34,9 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - New submissions add to the active task pool. They must never replace, cancel, or hide existing
   queued/running tasks. Only an explicit user action may kill a task, and MiniMax permits that only
   while the fresh remote status is `queued`.
+- Assets, submissions, and jobs persist in the repository data directory's SQLite/WAL database.
+  Preserve restart durability; only coordination locks, rate timers, and short poll caches belong
+  exclusively in RAM.
 - Polling must remain serialized and request-budgeted in the browser, coalesced/rate-limited across
   tabs on the server, and globally honor provider `Retry-After`. Signed output URLs remain
   server-side; never forward the Bearer header to an output CDN.
@@ -45,7 +48,11 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 
 - `app/main.py` — local HTTP boundary, confirmations/idempotency workflow, task lifecycle, polling,
   downloads, and static app mounting.
-- `app/provider.py` — purpose-built MiniMax adapter. It is the only provider HTTP layer.
+- `app/providers/base.py` — normalized provider protocol, public metadata, and sanitized errors.
+- `app/providers/registry.py` and `factory.py` — trusted code-owned adapter registration and
+  construction; never turn this into arbitrary dynamic imports or user-controlled upstream URLs.
+- `app/provider.py` — built-in purpose-built MiniMax adapter and the only production provider HTTP
+  layer.
 - `app/media.py` — local asset validation and exact provider payload construction.
 - `app/db.py` — SQLite assets, additive job pool, and persistent submission ledger.
 - `app/schemas.py` — browser-facing request and response contracts.
@@ -60,6 +67,7 @@ and locked in `pyproject.toml` and `uv.lock`.
 
 ```bash
 uv sync --locked
+uv run pre-commit run --all-files
 uv run pytest -q
 node --check app/static/app.js
 node --test tests/browser_logic.test.mjs

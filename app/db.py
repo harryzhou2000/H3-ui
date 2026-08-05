@@ -6,11 +6,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
-TERMINAL_JOB_STATUSES = frozenset(
-    {"succeeded", "failed", "cancelled", "deleted", "unavailable"}
-)
+TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled", "deleted", "unavailable"})
 JOB_STATUSES = ACTIVE_JOB_STATUSES | TERMINAL_JOB_STATUSES
 
 
@@ -92,10 +89,17 @@ class StudioStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    asset["id"], asset["kind"], asset["name"], asset["source_type"],
-                    asset["value"], asset.get("mime_type"), asset.get("size"),
-                    asset.get("notes", ""), json.dumps(asset.get("tags", [])),
-                    asset.get("created_at", int(time.time())), asset.get("provider_file_id"),
+                    asset["id"],
+                    asset["kind"],
+                    asset["name"],
+                    asset["source_type"],
+                    asset["value"],
+                    asset.get("mime_type"),
+                    asset.get("size"),
+                    asset.get("notes", ""),
+                    json.dumps(asset.get("tags", [])),
+                    asset.get("created_at", int(time.time())),
+                    asset.get("provider_file_id"),
                     asset.get("provider_expires_at"),
                 ),
             )
@@ -103,15 +107,23 @@ class StudioStore:
 
     def update_asset(self, asset_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
         allowed = {
-            "name", "notes", "tags_json", "provider_file_id", "provider_expires_at"
+            "name",
+            "notes",
+            "tags_json",
+            "value",
+            "source_type",
+            "mime_type",
+            "size",
+            "provider_file_id",
+            "provider_expires_at",
         }
         updates: list[str] = []
         values: list[Any] = []
         for key, value in fields.items():
-            db_key = "tags_json" if key == "tags" else key
-            if db_key not in allowed:
+            column_name = "tags_json" if key == "tags" else key
+            if column_name not in allowed:
                 continue
-            updates.append(f"{db_key} = ?")
+            updates.append(f"{column_name} = ?")
             values.append(json.dumps(value) if key == "tags" else value)
         if updates:
             values.append(asset_id)
@@ -130,9 +142,7 @@ class StudioStore:
     def _job(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["request"] = json.loads(data.pop("request_json")) if data["request_json"] else None
-        data["response"] = (
-            json.loads(data.pop("response_json")) if data["response_json"] else None
-        )
+        data["response"] = json.loads(data.pop("response_json")) if data["response_json"] else None
         return data
 
     def list_jobs(self) -> list[dict[str, Any]]:
@@ -246,9 +256,7 @@ class StudioStore:
                 started = True
             else:
                 existing = self._submission(row)
-                same_intent = (
-                    existing["operation"] == operation and existing["request"] == request
-                )
+                same_intent = existing["operation"] == operation and existing["request"] == request
                 if existing["status"] == "rejected" and same_intent:
                     cursor = db.execute(
                         """
@@ -330,16 +338,12 @@ class StudioStore:
                     now,
                 ),
             )
-            row = db.execute(
-                "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
-            ).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE task_id = ?", (task_id,)).fetchone()
         if row is None:  # pragma: no cover - transaction guarantees the row
             raise RuntimeError("Submitted task was not added to the active pool")
         return self._job(row)
 
-    def fail_submission(
-        self, client_request_id: str, status: str, error: dict[str, Any]
-    ) -> None:
+    def fail_submission(self, client_request_id: str, status: str, error: dict[str, Any]) -> None:
         with self._connect() as db:
             db.execute(
                 """

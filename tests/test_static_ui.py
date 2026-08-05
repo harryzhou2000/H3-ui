@@ -3,7 +3,6 @@ from __future__ import annotations
 from html.parser import HTMLParser
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -11,11 +10,20 @@ class _ElementIndex(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.nodes: list[tuple[str, dict[str, str | None]]] = []
+        self.form_stack: list[str | None] = []
+        self.form_buttons: dict[str, list[dict[str, str | None]]] = {}
 
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        self.nodes.append((tag, dict(attrs)))
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        self.nodes.append((tag, attributes))
+        if tag == "form":
+            self.form_stack.append(attributes.get("id"))
+        elif tag == "button" and self.form_stack and self.form_stack[-1]:
+            self.form_buttons.setdefault(self.form_stack[-1] or "", []).append(attributes)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self.form_stack.pop()
 
 
 def _index() -> _ElementIndex:
@@ -33,13 +41,15 @@ def test_critical_dialogs_have_accessible_names_and_descriptions() -> None:
     assert by_id["remote-dialog"][1]["aria-describedby"] == "remote-dialog-description"
     assert by_id["confirm-dialog"][1]["aria-labelledby"] == "confirm-title"
     assert by_id["confirm-dialog"][1]["aria-describedby"] == "confirm-description"
-    for referenced_id in {
+    assert by_id["rename-dialog"][1]["aria-labelledby"] == "rename-dialog-title"
+    for referenced_id in (
         "text-dialog-title",
         "remote-dialog-title",
         "remote-dialog-description",
         "confirm-title",
         "confirm-description",
-    }:
+        "rename-dialog-title",
+    ):
         assert referenced_id in by_id
 
 
@@ -79,3 +89,78 @@ def test_context_ir_submission_reveals_the_active_pool() -> None:
         "async function uploadFiles", 1
     )[0]
     assert 'setActiveJobFilter("active")' in context_ir
+
+
+def test_required_dialogs_can_always_be_cancelled_without_validation() -> None:
+    index = _index()
+    for form_id in ("text-form", "remote-form", "rename-form"):
+        cancel_buttons = [
+            button for button in index.form_buttons[form_id] if button.get("value") == "cancel"
+        ]
+        assert len(cancel_buttons) == 2
+        assert all(button.get("type") == "submit" for button in cancel_buttons)
+        assert all("formnovalidate" in button for button in cancel_buttons)
+
+
+def test_source_shelf_owns_a_bounded_scroll_region_on_desktop() -> None:
+    styles = (ROOT / "app" / "static" / "styles.css").read_text(encoding="utf-8")
+    library_rule = styles.split(".library-panel {", 1)[1].split("}", 1)[0]
+    asset_rule = styles.split(".asset-list {", 1)[1].split("}", 1)[0]
+
+    assert "display: flex" in library_rule
+    assert "height: calc(100dvh - 104px)" in library_rule
+    assert "min-height: 680px" in library_rule
+    assert "position: relative" in library_rule
+    assert "overflow: hidden" in library_rule
+    assert "min-height: 0" in asset_rule
+    assert "overflow-y: auto" in asset_rule
+    assert "overscroll-behavior: contain" in asset_rule
+
+
+def test_attached_images_have_thumbnails_and_all_assets_have_edit_controls() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'thumb.className = "attached-thumb"' in browser_source
+    assert "imagePreviewUrl(asset)" in browser_source
+    assert 'image.referrerPolicy = "no-referrer"' in browser_source
+    assert 'makeButton("Edit"' in browser_source
+    assert 'method: "PATCH"' in browser_source
+
+
+def test_frame_ratio_ui_offers_local_center_crop_without_disabling_ratio() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "ratio.disabled = false" in browser_source
+    assert "center-crops local frames without stretching" in browser_source
+
+
+def test_text_fields_preserve_native_clipboard_and_offer_prompt_buttons() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    styles = (ROOT / "app" / "static" / "styles.css").read_text(encoding="utf-8")
+    index = _index()
+    by_id = {attrs["id"]: (tag, attrs) for tag, attrs in index.nodes if attrs.get("id")}
+
+    assert "setupNativeClipboard" in browser_source
+    assert '["copy", "cut"]' in browser_source
+    assert 'event.clipboardData?.getData("text/plain")' in browser_source
+    assert "field.setRangeText" in browser_source
+    assert 'field.dispatchEvent(new Event("input"' in browser_source
+    assert "navigator.clipboard?.writeText" in browser_source
+    assert "navigator.clipboard?.readText" in browser_source
+    assert "user-select: text" in styles
+    assert by_id["copy-prompt"][0] == "button"
+    assert by_id["paste-prompt"][0] == "button"
+
+
+def test_saved_requests_can_be_loaded_as_fresh_workspace_intents() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    loader = browser_source.split("function loadRequestIntoWorkspace(job)", 1)[1].split(
+        "function jobTask", 1
+    )[0]
+
+    assert 'makeButton("Load workspace"' in browser_source
+    assert "job.request?.content" in browser_source
+    assert '$("#prompt").value = promptItem.text' in loader
+    assert "state.attached = attached" in loader
+    assert "invalidatePreview()" in loader
+    assert "loaded as a new workspace intent" in loader

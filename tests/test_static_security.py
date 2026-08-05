@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_browser_bundle_has_no_provider_key_or_direct_provider_calls() -> None:
     browser_source = "\n".join(
-        path.read_text(encoding="utf-8") for path in (ROOT / "app" / "static").glob("*")
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "app" / "static").glob("*")
         if path.is_file()
     )
     assert "MINIMAX_API_KEY" not in browser_source

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import ipaddress
+import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -9,40 +9,17 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import Settings
-
-
-class ProviderError(Exception):
-    def __init__(
-        self,
-        status_code: int,
-        message: str,
-        *,
-        error_type: str = "provider_error",
-        request_id: str | None = None,
-        retry_after: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.message = message
-        self.error_type = error_type
-        self.request_id = request_id
-        self.retry_after = retry_after
-
-    def public_detail(self) -> dict[str, Any]:
-        detail: dict[str, Any] = {
-            "type": self.error_type,
-            "message": self.message,
-            "http_code": self.status_code,
-        }
-        if self.request_id:
-            detail["request_id"] = self.request_id
-        if self.retry_after:
-            detail["retry_after"] = self.retry_after
-        return detail
+from app.providers.base import ProviderError, ProviderInfo
 
 
 class MiniMaxClient:
     """Purpose-built MiniMax adapter. It never accepts arbitrary upstream paths."""
+
+    info = ProviderInfo(
+        name="MiniMax",
+        model="MiniMax-H3",
+        api_contract="Video Generation V2",
+    )
 
     def __init__(
         self,
@@ -173,9 +150,7 @@ class MiniMaxClient:
     async def delete_task(self, task_id: str) -> dict[str, Any]:
         return await self._request("DELETE", f"/v2/video_generation/{task_id}")
 
-    async def upload_video_input(
-        self, path: Path, filename: str, mime_type: str
-    ) -> dict[str, Any]:
+    async def upload_video_input(self, path: Path, filename: str, mime_type: str) -> dict[str, Any]:
         with path.open("rb") as handle:
             return await self._request(
                 "POST",

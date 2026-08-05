@@ -104,7 +104,11 @@
             ></textarea>
             <div class="prompt-footer">
               <span>One clear prompt is required for every H3 task.</span>
-              <button id="clear-composer" class="text-button" type="button">Clear scene</button>
+              <span class="prompt-tools">
+                <button id="copy-prompt" class="text-button" type="button">Copy</button>
+                <button id="paste-prompt" class="text-button" type="button">Paste</button>
+                <button id="clear-composer" class="text-button" type="button">Clear scene</button>
+              </span>
             </div>
           </div>
 
@@ -153,6 +157,7 @@
                   <option value="21:9">21:9</option>
                   <option value="adaptive">Adaptive</option>
                 </select>
+                <small id="ratio-help">Choose the requested output frame.</small>
               </label>
               <label class="toggle-field">
                 <span>
@@ -259,7 +264,7 @@
             <p class="eyebrow">Input library</p>
             <h2 id="text-dialog-title">Save a text prompt</h2>
           </div>
-          <button class="modal-close" value="cancel" aria-label="Close">×</button>
+          <button class="modal-close" type="submit" value="cancel" formnovalidate aria-label="Close">×</button>
         </div>
         <label>
           <span>Name</span>
@@ -274,8 +279,8 @@
           <input name="tags" placeholder="cinematic, exterior" />
         </label>
         <div class="modal-actions">
-          <button class="button button-quiet" value="cancel">Cancel</button>
-          <button class="button button-primary" value="default">Save text</button>
+          <button class="button button-quiet" type="submit" value="cancel" formnovalidate>Cancel</button>
+          <button class="button button-primary" type="submit" value="default">Save text</button>
         </div>
       </form>
     </dialog>
@@ -287,7 +292,7 @@
             <p class="eyebrow">Input library</p>
             <h2 id="remote-dialog-title">Add a remote input</h2>
           </div>
-          <button class="modal-close" value="cancel" aria-label="Close">×</button>
+          <button class="modal-close" type="submit" value="cancel" formnovalidate aria-label="Close">×</button>
         </div>
         <label>
           <span>Kind</span>
@@ -307,8 +312,44 @@
         </label>
         <p id="remote-dialog-description" class="form-note">Private-network URLs are blocked. MiniMax file inputs expire after seven days.</p>
         <div class="modal-actions">
-          <button class="button button-quiet" value="cancel">Cancel</button>
-          <button class="button button-primary" value="default">Add input</button>
+          <button class="button button-quiet" type="submit" value="cancel" formnovalidate>Cancel</button>
+          <button class="button button-primary" type="submit" value="default">Add input</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="modal" aria-labelledby="rename-dialog-title">
+      <form method="dialog" id="rename-form">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Source shelf</p>
+            <h2 id="rename-dialog-title">Edit input</h2>
+          </div>
+          <button class="modal-close" type="submit" value="cancel" formnovalidate aria-label="Close">×</button>
+        </div>
+        <label>
+          <span>Name</span>
+          <input name="name" required maxlength="160" autocomplete="off" />
+        </label>
+        <label id="edit-text-row" hidden>
+          <span>Text</span>
+          <textarea name="text" maxlength="7000" rows="8"></textarea>
+        </label>
+        <label id="edit-url-row" hidden>
+          <span>Public URL or MiniMax file ID</span>
+          <input name="url" maxlength="4096" />
+        </label>
+        <label>
+          <span>Notes</span>
+          <textarea name="notes" maxlength="1000" rows="3"></textarea>
+        </label>
+        <label>
+          <span>Tags <small>comma-separated</small></span>
+          <input name="tags" maxlength="1000" />
+        </label>
+        <div class="modal-actions">
+          <button class="button button-quiet" type="submit" value="cancel" formnovalidate>Cancel</button>
+          <button class="button button-primary" type="submit" value="default">Save changes</button>
         </div>
       </form>
     </dialog>
@@ -324,8 +365,8 @@
           <span id="confirm-check-label">I understand this can spend MiniMax credits.</span>
         </label>
         <div class="modal-actions">
-          <button class="button button-quiet" value="cancel">Go back</button>
-          <button id="confirm-submit" class="button button-accent" value="default" disabled>Confirm</button>
+          <button class="button button-quiet" type="submit" value="cancel" formnovalidate>Go back</button>
+          <button id="confirm-submit" class="button button-accent" type="submit" value="default" disabled>Confirm</button>
         </div>
       </form>
     </dialog>

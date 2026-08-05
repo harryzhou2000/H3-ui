@@ -5,12 +5,12 @@ import copy
 import ipaddress
 import re
 import time
+from collections.abc import Awaitable, Callable
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
-from urllib.parse import quote, urlparse
+from typing import Any
+from urllib.parse import quote
 
-import httpx
 import uvicorn
 from fastapi import (
     FastAPI,
@@ -27,7 +27,8 @@ from fastapi.staticfiles import StaticFiles
 from app.config import Settings
 from app.db import StudioStore
 from app.media import MediaService, ValidationError
-from app.provider import MiniMaxClient, ProviderError
+from app.providers.base import ProviderError, VideoProvider
+from app.providers.factory import build_provider
 from app.schemas import (
     AssetRecord,
     AssetUpdate,
@@ -40,7 +41,6 @@ from app.schemas import (
     TextAssetCreate,
     VideoGenerationCreate,
 )
-
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SAFE_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
@@ -195,8 +195,7 @@ def _submission_intent_error(existing: dict[str, Any]) -> HTTPException:
         status_code=409,
         detail={
             "message": (
-                "This client request ID is already reserved for a different "
-                "operation or request"
+                "This client request ID is already reserved for a different operation or request"
             ),
             "submission_status": existing.get("status"),
             "existing_operation": existing.get("operation"),
@@ -247,7 +246,7 @@ def _provider_created_at(value: Any) -> int | None:
 
 def create_app(
     settings: Settings | None = None,
-    provider: MiniMaxClient | None = None,
+    provider: VideoProvider | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     if settings.host.lower() not in {"127.0.0.1", "localhost", "::1"}:
@@ -256,7 +255,7 @@ def create_app(
     store = StudioStore(settings.database_path)
     store.initialize()
     media = MediaService(settings, store)
-    provider = provider or MiniMaxClient(settings)
+    provider = provider or build_provider(settings)
 
     app = FastAPI(
         title="H3 Studio",
@@ -296,9 +295,7 @@ def create_app(
             delay = app.state.poll_next_start - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
-            app.state.poll_next_start = (
-                time.monotonic() + POLL_START_INTERVAL_SECONDS
-            )
+            app.state.poll_next_start = time.monotonic() + POLL_START_INTERVAL_SECONDS
 
     def note_provider_backoff(exc: ProviderError) -> None:
         if exc.status_code != 429:
@@ -330,9 +327,12 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(), "
+            "clipboard-read=(self), clipboard-write=(self)"
+        )
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
+            "default-src 'self'; img-src 'self' data: blob: https:; media-src 'self' blob:; "
             "script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'self'"
         )
@@ -354,9 +354,9 @@ def create_app(
         return {
             "ok": True,
             "key_configured": settings.api_key_configured,
-            "provider": "MiniMax",
-            "model": "MiniMax-H3",
-            "api_contract": "Video Generation V2",
+            "provider": provider.info.name,
+            "model": provider.info.model,
+            "api_contract": provider.info.api_contract,
         }
 
     @app.post("/api/connection/test")
@@ -376,9 +376,7 @@ def create_app(
 
     @app.post("/api/assets/remote", response_model=AssetRecord, status_code=201)
     async def create_remote_asset(body: RemoteAssetCreate) -> AssetRecord:
-        asset = media.create_remote_asset(
-            body.kind, body.name, body.url, body.notes, body.tags
-        )
+        asset = media.create_remote_asset(body.kind, body.name, body.url, body.notes, body.tags)
         return media.present_asset(asset)
 
     @app.post("/api/assets/upload", response_model=AssetRecord, status_code=201)
@@ -389,9 +387,7 @@ def create_app(
         tags: str = Form(default="", max_length=1000),
     ) -> AssetRecord:
         parsed_tags = [tag.strip() for tag in tags.split(",") if tag.strip()][:20]
-        asset = await media.save_upload(
-            file, display_name=name, notes=notes, tags=parsed_tags
-        )
+        asset = await media.save_upload(file, display_name=name, notes=notes, tags=parsed_tags)
         return media.present_asset(asset)
 
     @app.patch("/api/assets/{asset_id}", response_model=AssetRecord)
@@ -400,7 +396,7 @@ def create_app(
         if not existing:
             raise HTTPException(status_code=404, detail="Asset not found")
         updates = body.model_dump(exclude_none=True)
-        updated = store.update_asset(asset_id, updates)
+        updated = media.update_asset(existing, updates)
         return media.present_asset(updated or existing)
 
     @app.get("/api/assets/{asset_id}/content")
@@ -485,9 +481,7 @@ def create_app(
                 status_code=409,
                 detail="Explicit confirmation is required for this billable operation",
             )
-        started, existing = store.begin_submission(
-            client_request_id, operation, request_snapshot
-        )
+        started, existing = store.begin_submission(client_request_id, operation, request_snapshot)
         if not started:
             same_intent = (
                 existing.get("operation") == operation

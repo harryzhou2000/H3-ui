@@ -34,6 +34,9 @@ See [.env.example](.env.example) for optional local runtime settings.
 1. Add reusable text prompts, public URLs, `mm_file://` references, or local media to the source
    shelf. Local assets and metadata persist under `data/`.
 2. Attach media, assign its role, and choose duration, ratio, resolution, and watermark settings.
+   Attached local images show a thumbnail. In first/last-frame mode, `adaptive` preserves the
+   source shape; choosing a concrete ratio center-crops local JPEG/PNG/WebP frames without
+   stretching them. Remote and MiniMax file-ID frames are never fetched locally for cropping.
 3. Select **Review request**. This validates and previews the exact payload locally; it does not
    call MiniMax.
 4. Select **Generate video**, review the published base-price estimate, and explicitly acknowledge
@@ -45,6 +48,12 @@ See [.env.example](.env.example) for optional local runtime settings.
 6. When a task succeeds, **Save MP4** refreshes its expiring provider URL and streams it to
    `data/downloads/` before offering a browser download.
 
+Any local task card with a stored request has **Load workspace**. It restores the prompt, surviving
+source attachments and roles, output settings, and frame crop choice, then rotates to a fresh
+idempotency intent. Editing a source-shelf item can update names and metadata, text-prompt bodies,
+or public URL/file-ID values as appropriate; local media bytes remain immutable. Native clipboard
+shortcuts are preserved in all text fields, with explicit Copy/Paste controls on the main prompt.
+
 MiniMax only permits “Kill” while a task is `queued`. Once a task reaches `running`, the documented
 API rejects cancellation, so the UI disables that action. Succeeded and failed remote records can
 be explicitly deleted without removing local history or saved outputs.
@@ -52,6 +61,10 @@ be explicitly deleted without removing local history or saved outputs.
 MiniMax exposes queryable task history for seven days. If an older locally active task is no longer
 available from the provider, H3 Studio marks it `unavailable`, stops polling it, and permits an
 explicit local-history removal without claiming that the remote task was cancelled.
+
+Assets, submissions, and every queued/running task are committed to `data/studio.db` (SQLite/WAL).
+Only short-lived poll locks and rate-limit timers live in RAM, so the full active pool reloads after
+a server restart and resumes polling when the browser reconnects.
 
 Local MP4 Base64 requests are supported within the 64 MB body limit. For larger media or MOV input,
 choose **Upload to MiniMax** on an asset; this explicitly sends it through the official Files API
@@ -100,6 +113,26 @@ RUN_LIVE_MINIMAX_TESTS=1 uv run pytest tests/test_live_minimax.py -q
 That probe performs `GET /v2/query/video_generation?page_num=1&page_size=1`, discards task data, and
 does not create, cancel, upload, delete, or regenerate anything. Live billable POST operations are
 never part of the test suite.
+
+## Development safeguards
+
+Install the repository-managed hook after `uv sync`:
+
+```bash
+uv run pre-commit install
+uv run pre-commit run --all-files
+```
+
+The hook uses tools locked into the local `.venv`; it trims whitespace, validates YAML/TOML and
+JavaScript syntax, runs Ruff lint/format, rejects conflict markers, private keys, oversized files,
+and likely secrets. The same checks and fake-only test suite run in GitHub Actions. No hook or
+default CI step loads `.env` or calls MiniMax.
+
+Provider-independent application code targets the `VideoProvider` protocol in
+`app/providers/base.py`. Trusted adapters are registered by code in `app/providers/factory.py`;
+tests and future local AI components can instead inject any compatible provider directly into
+`create_app`. The built-in MiniMax adapter remains in `app/provider.py`, and its authenticated host
+remains pinned rather than being selected from user-controlled provider URLs.
 
 ## API surface
 

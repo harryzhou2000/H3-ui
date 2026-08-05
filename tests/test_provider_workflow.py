@@ -4,7 +4,7 @@ import asyncio
 import json
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
 import httpx
@@ -90,7 +90,9 @@ async def submit(client, request_id: str) -> dict:
     return response.json()
 
 
-async def test_new_submissions_accumulate_and_duplicate_request_is_not_recreated(make_client) -> None:
+async def test_new_submissions_accumulate_and_duplicate_request_is_not_recreated(
+    make_client,
+) -> None:
     upstream = StatefulMiniMax()
     client = make_client(upstream)
     first = await submit(client, "request-first")
@@ -252,12 +254,10 @@ async def test_cross_task_polling_honors_server_concurrency_cap(
 
     client = make_client(coordinated)
     task_ids = [
-        (await submit(client, f"request-concurrency-{index}"))["task_id"]
-        for index in range(5)
+        (await submit(client, f"request-concurrency-{index}"))["task_id"] for index in range(5)
     ]
     refreshes = [
-        asyncio.create_task(client.post(f"/api/jobs/{task_id}/refresh"))
-        for task_id in task_ids
+        asyncio.create_task(client.post(f"/api/jobs/{task_id}/refresh")) for task_id in task_ids
     ]
 
     await asyncio.wait_for(saturated.wait(), timeout=1)
@@ -283,10 +283,7 @@ async def test_cross_task_poll_starts_are_globally_paced(make_client, monkeypatc
         return upstream(request)
 
     client = make_client(timed)
-    task_ids = [
-        (await submit(client, f"request-paced-{index}"))["task_id"]
-        for index in range(3)
-    ]
+    task_ids = [(await submit(client, f"request-paced-{index}"))["task_id"] for index in range(3)]
     responses = await asyncio.gather(
         *(client.post(f"/api/jobs/{task_id}/refresh") for task_id in task_ids)
     )
@@ -294,8 +291,7 @@ async def test_cross_task_poll_starts_are_globally_paced(make_client, monkeypatc
     assert all(response.status_code == 200 for response in responses)
     assert len(query_started_at) == 3
     gaps = [
-        right - left
-        for left, right in zip(query_started_at, query_started_at[1:])
+        right - left for left, right in zip(query_started_at, query_started_at[1:], strict=False)
     ]
     assert all(gap >= interval * 0.75 for gap in gaps)
 
@@ -325,7 +321,7 @@ async def test_repeated_task_poll_failure_is_coalesced(make_client) -> None:
 def test_retry_after_accepts_delta_seconds_and_http_dates() -> None:
     assert _retry_after_seconds("30") == 30
     future = format_datetime(
-        datetime.now(timezone.utc) + timedelta(seconds=60),
+        datetime.now(UTC) + timedelta(seconds=60),
         usegmt=True,
     )
     assert 45 <= _retry_after_seconds(future) <= 60

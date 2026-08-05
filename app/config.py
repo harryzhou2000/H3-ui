@@ -6,7 +6,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OFFICIAL_MINIMAX_API_BASE_URL = "https://api.minimaxi.com"
 
@@ -45,7 +44,7 @@ class Settings:
         return bool(self.api_key)
 
     @classmethod
-    def from_env(cls, env_file: Path | None = None) -> "Settings":
+    def from_env(cls, env_file: Path | None = None) -> Settings:
         root = PROJECT_ROOT
         load_dotenv(env_file or root / ".env", override=False)
         data_dir = _resolve_path(os.getenv("H3_STUDIO_DATA_DIR", "./data"), root)
@@ -64,12 +63,8 @@ class Settings:
             api_base_url=OFFICIAL_MINIMAX_API_BASE_URL,
             host=os.getenv("H3_STUDIO_HOST", "127.0.0.1"),
             port=int(os.getenv("H3_STUDIO_PORT", "8000")),
-            request_timeout_seconds=float(
-                os.getenv("H3_STUDIO_REQUEST_TIMEOUT_SECONDS", "60")
-            ),
-            download_timeout_seconds=float(
-                os.getenv("H3_STUDIO_DOWNLOAD_TIMEOUT_SECONDS", "300")
-            ),
+            request_timeout_seconds=float(os.getenv("H3_STUDIO_REQUEST_TIMEOUT_SECONDS", "60")),
+            download_timeout_seconds=float(os.getenv("H3_STUDIO_DOWNLOAD_TIMEOUT_SECONDS", "300")),
         )
 
     def prepare(self) -> None:

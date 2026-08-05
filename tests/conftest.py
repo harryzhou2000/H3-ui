@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import httpx
 import pytest
@@ -22,7 +22,7 @@ async def make_client(tmp_path: Path) -> Callable:
         settings = Settings(
             project_root=tmp_path,
             data_dir=tmp_path / "data",
-            api_key="test-secret-sentinel",
+            api_key="test-secret-sentinel",  # pragma: allowlist secret
             api_base_url="https://api.minimaxi.test",
         )
         provider = MiniMaxClient(settings, transport=httpx.MockTransport(handler))

@@ -7,11 +7,13 @@ import mimetypes
 import re
 import time
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import UploadFile
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import Settings
 from app.db import StudioStore
@@ -24,7 +26,6 @@ from app.schemas import (
     RegenerationCreate,
     VideoGenerationCreate,
 )
-
 
 MAX_REQUEST_BYTES = 64_000_000
 MAX_FILE_BYTES = {
@@ -46,10 +47,70 @@ ROLE_KIND = {
     "base_video": AssetKind.video,
 }
 MM_FILE_PATTERN = re.compile(r"^mm_file://([A-Za-z0-9_-]+)$")
+FRAME_ROLES = {"first_frame", "last_frame"}
+ASPECT_RATIOS = {
+    "21:9": (21, 9),
+    "16:9": (16, 9),
+    "4:3": (4, 3),
+    "1:1": (1, 1),
+    "3:4": (3, 4),
+    "9:16": (9, 16),
+}
+MAX_CROP_PIXELS = 80_000_000
 
 
 class ValidationError(ValueError):
     pass
+
+
+def crop_image_to_ratio(path: Path, ratio: str) -> tuple[bytes, str]:
+    """Center-crop a local image without stretching or resampling it."""
+
+    try:
+        ratio_width, ratio_height = ASPECT_RATIOS[ratio]
+    except KeyError as exc:
+        raise ValidationError(f"Unsupported crop ratio: {ratio}") from exc
+
+    try:
+        with Image.open(path) as opened:
+            source_format = (opened.format or "").upper()
+            opened.seek(0)
+            image = ImageOps.exif_transpose(opened)
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > MAX_CROP_PIXELS:
+                raise ValidationError("Image dimensions are unsafe for local cropping")
+
+            if width * ratio_height > height * ratio_width:
+                crop_width = max(1, height * ratio_width // ratio_height)
+                left = (width - crop_width) // 2
+                box = (left, 0, left + crop_width, height)
+            else:
+                crop_height = max(1, width * ratio_height // ratio_width)
+                top = (height - crop_height) // 2
+                box = (0, top, width, top + crop_height)
+            cropped = image.crop(box)
+
+            output = BytesIO()
+            if source_format in {"JPEG", "JPG"}:
+                if cropped.mode not in {"RGB", "L"}:
+                    cropped = cropped.convert("RGB")
+                cropped.save(output, format="JPEG", quality=95)
+                mime = "image/jpeg"
+            elif source_format == "PNG":
+                cropped.save(output, format="PNG")
+                mime = "image/png"
+            elif source_format == "WEBP":
+                cropped.save(output, format="WEBP", quality=95)
+                mime = "image/webp"
+            else:
+                raise ValidationError(
+                    "Forced frame cropping supports local JPEG, PNG, and WebP images"
+                )
+    except ValidationError:
+        raise
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError) as exc:
+        raise ValidationError("Local image could not be decoded for cropping") from exc
+    return output.getvalue(), mime
 
 
 def validate_media_url(value: str) -> tuple[AssetSource, str]:
@@ -122,9 +183,9 @@ class MediaService:
         result["preview_url"] = (
             f"/api/assets/{asset['id']}/content" if source == AssetSource.local else None
         )
-        result["source_url"] = asset["value"] if source in {
-            AssetSource.remote, AssetSource.mm_file
-        } else None
+        result["source_url"] = (
+            asset["value"] if source in {AssetSource.remote, AssetSource.mm_file} else None
+        )
         result["text"] = asset["value"] if source == AssetSource.text else None
         result.pop("value", None)
         return AssetRecord.model_validate(result)
@@ -151,8 +212,7 @@ class MediaService:
         extension = Path(original).suffix.lower()
         if extension not in EXTENSIONS[kind]:
             raise ValidationError(
-                f"Unsupported {kind.value} format. Allowed: "
-                + ", ".join(sorted(EXTENSIONS[kind]))
+                f"Unsupported {kind.value} format. Allowed: " + ", ".join(sorted(EXTENSIONS[kind]))
             )
         asset_id = uuid.uuid4().hex
         stored_name = f"{asset_id}{extension}"
@@ -241,10 +301,47 @@ class MediaService:
             self.local_path(asset).unlink(missing_ok=True)
         return asset
 
-    def _asset_value(self, item: ComposerItem) -> tuple[AssetKind, str, int]:
+    def update_asset(self, asset: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any] | None:
+        updates = dict(changes)
+        text = updates.pop("text", None)
+        url = updates.pop("url", None)
+        source = AssetSource(asset["source_type"])
+
+        if text is not None:
+            if source != AssetSource.text:
+                raise ValidationError("Only text-prompt assets accept text edits")
+            if not text.strip():
+                raise ValidationError("Text prompt cannot be empty")
+            updates.update(value=text, size=len(text.encode("utf-8")))
+
+        if url is not None:
+            if source not in {AssetSource.remote, AssetSource.mm_file}:
+                raise ValidationError("Only URL or file-ID assets accept source edits")
+            source_type, normalized = validate_media_url(url)
+            provider_match = MM_FILE_PATTERN.fullmatch(normalized)
+            updates.update(
+                value=normalized,
+                source_type=source_type.value,
+                size=None,
+                provider_file_id=provider_match.group(1) if provider_match else None,
+                provider_expires_at=None,
+            )
+
+        return self.store.update_asset(asset["id"], updates)
+
+    def _asset_value(
+        self, item: ComposerItem, *, frame_crop_ratio: str | None = None
+    ) -> tuple[AssetKind, str, int]:
         if item.text:
             return AssetKind.text, item.text.strip(), len(item.text.encode("utf-8"))
+        crop_frame = bool(
+            frame_crop_ratio and item.type == AssetKind.image and item.role in FRAME_ROLES | {None}
+        )
         if item.url:
+            if crop_frame:
+                raise ValidationError(
+                    "Forced frame cropping requires a local JPEG, PNG, or WebP image"
+                )
             _, value = validate_media_url(item.url)
             return item.type, value, len(value.encode("utf-8"))
 
@@ -258,13 +355,21 @@ class MediaService:
         if source == AssetSource.text:
             return kind, asset["value"].strip(), len(asset["value"].encode("utf-8"))
         if source in {AssetSource.remote, AssetSource.mm_file}:
+            if crop_frame:
+                raise ValidationError(
+                    "Forced frame cropping requires a local JPEG, PNG, or WebP image"
+                )
             _, value = validate_media_url(asset["value"])
             return kind, value, len(value.encode("utf-8"))
 
         # Prefer an unexpired MiniMax file reference when the user explicitly uploaded it.
-        if asset.get("provider_file_id") and (
-            not asset.get("provider_expires_at")
-            or asset["provider_expires_at"] > int(time.time()) + 60
+        if (
+            not crop_frame
+            and asset.get("provider_file_id")
+            and (
+                not asset.get("provider_expires_at")
+                or asset["provider_expires_at"] > int(time.time()) + 60
+            )
         ):
             value = f"mm_file://{asset['provider_file_id']}"
             return kind, value, len(value)
@@ -272,8 +377,11 @@ class MediaService:
         path = self.local_path(asset)
         if not path.is_file():
             raise ValidationError(f"Local file for asset {item.asset_id} is missing")
-        raw = path.read_bytes()
-        mime = asset.get("mime_type") or canonical_mime(kind, asset["name"], None)
+        if crop_frame:
+            raw, mime = crop_image_to_ratio(path, frame_crop_ratio or "")
+        else:
+            raw = path.read_bytes()
+            mime = asset.get("mime_type") or canonical_mime(kind, asset["name"], None)
         if kind == AssetKind.video and mime != "video/mp4":
             # MiniMax only documents Base64 for MP4; MOV must use a public/mm_file URL.
             raise ValidationError("Local MOV files must be uploaded to MiniMax before use")
@@ -288,16 +396,20 @@ class MediaService:
             ".heic": "image/heic",
             ".heif": "image/heif",
         }
-        data_mime = data_uri_mimes.get(path.suffix.lower(), mime)
+        data_mime = mime if crop_frame else data_uri_mimes.get(path.suffix.lower(), mime)
         value = f"data:{data_mime};base64,{base64.b64encode(raw).decode('ascii')}"
         return kind, value, len(value)
 
     def build_content(
-        self, items: list[ComposerItem], *, allow_base_video: bool = False
+        self,
+        items: list[ComposerItem],
+        *,
+        allow_base_video: bool = False,
+        frame_crop_ratio: str | None = None,
     ) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
         for item in items:
-            kind, value, _ = self._asset_value(item)
+            kind, value, _ = self._asset_value(item, frame_crop_ratio=frame_crop_ratio)
             if kind == AssetKind.text:
                 content.append({"type": "text", "text": value})
                 continue
@@ -331,14 +443,15 @@ class MediaService:
         if unroled and not (
             len(media) == 1 and len(unroled) == 1 and unroled[0]["type"] == "image_url"
         ):
-            raise ValidationError("Every media item needs a role (except one default first-frame image)")
+            raise ValidationError(
+                "Every media item needs a role (except one default first-frame image)"
+            )
         for item in content:
             role = item.get("role")
             if role and ROLE_KIND.get(role) and item["type"] != f"{ROLE_KIND[role].value}_url":
                 raise ValidationError(f"Role {role} cannot be used on {item['type']}")
         if any(role in {"first_frame", "last_frame"} for role in roles) and any(
-            role in {"reference_image", "reference_video", "reference_audio"}
-            for role in roles
+            role in {"reference_image", "reference_video", "reference_audio"} for role in roles
         ):
             raise ValidationError("Frame inputs and reference inputs cannot be mixed")
         limits = {
@@ -362,9 +475,7 @@ class MediaService:
         elif allow_base_video:
             raise ValidationError("Regeneration content requires one base_video")
 
-        frame_mode = bool(unroled) or any(
-            role in {"first_frame", "last_frame"} for role in roles
-        )
+        frame_mode = bool(unroled) or any(role in {"first_frame", "last_frame"} for role in roles)
         if not media and ratio == "adaptive":
             raise ValidationError("Text-to-video ratio must be a concrete aspect ratio")
         if frame_mode and ratio not in (None, "adaptive"):
@@ -391,14 +502,20 @@ class MediaService:
         return safe
 
     def generation_payload(self, request: VideoGenerationCreate) -> tuple[dict[str, Any], int]:
-        content = self.build_content(request.content)
-        self.validate_content(content, ratio=request.ratio)
+        frame_mode = any(
+            item.type == AssetKind.image and item.role in FRAME_ROLES | {None}
+            for item in request.content
+        )
+        crop_ratio = request.ratio if frame_mode and request.ratio != "adaptive" else None
+        provider_ratio = "adaptive" if frame_mode else request.ratio
+        content = self.build_content(request.content, frame_crop_ratio=crop_ratio)
+        self.validate_content(content, ratio=provider_ratio)
         payload: dict[str, Any] = {
             "model": request.model,
             "content": content,
             "resolution": request.resolution,
             "duration": request.duration,
-            "ratio": request.ratio,
+            "ratio": provider_ratio,
             "aigc_watermark": request.aigc_watermark,
         }
         if request.callback_url:
@@ -406,21 +523,25 @@ class MediaService:
         return payload, self.request_size(payload)
 
     def context_ir_payload(self, request: ContextIRCreate) -> tuple[dict[str, Any], int]:
-        content = self.build_content(request.content)
-        self.validate_content(content, ratio=request.ratio)
+        frame_mode = any(
+            item.type == AssetKind.image and item.role in FRAME_ROLES | {None}
+            for item in request.content
+        )
+        crop_ratio = request.ratio if frame_mode and request.ratio != "adaptive" else None
+        provider_ratio = "adaptive" if frame_mode else request.ratio
+        content = self.build_content(request.content, frame_crop_ratio=crop_ratio)
+        self.validate_content(content, ratio=provider_ratio)
         payload: dict[str, Any] = {
             "model": request.model,
             "content": content,
             "duration": request.duration,
-            "ratio": request.ratio,
+            "ratio": provider_ratio,
         }
         if request.callback_url:
             payload["callback_url"] = validate_callback_url(request.callback_url)
         return payload, self.request_size(payload)
 
-    def regeneration_payload(
-        self, request: RegenerationCreate
-    ) -> tuple[dict[str, Any], int]:
+    def regeneration_payload(self, request: RegenerationCreate) -> tuple[dict[str, Any], int]:
         payload: dict[str, Any] = {
             "model": request.model,
             "resolution": request.resolution,
@@ -429,9 +550,7 @@ class MediaService:
         if request.source_task_id:
             payload["source_task_id"] = request.source_task_id
         else:
-            payload["content"] = self.build_content(
-                request.content or [], allow_base_video=True
-            )
+            payload["content"] = self.build_content(request.content or [], allow_base_video=True)
         if request.callback_url:
             payload["callback_url"] = validate_callback_url(request.callback_url)
         return payload, self.request_size(payload)

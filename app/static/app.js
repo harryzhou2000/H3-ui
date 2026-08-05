@@ -27,6 +27,8 @@ const state = {
   pollInFlight: new Set(),
   pollCycle: { running: false },
   nextPollAt: new Map(),
+  frameMode: false,
+  renamingAssetId: null,
 };
 
 class ApiError extends Error {
@@ -110,6 +112,16 @@ function kindLabel(kind) {
   return { text: "TXT", image: "IMG", video: "VID", audio: "AUD" }[kind] || "FILE";
 }
 
+function imagePreviewUrl(asset) {
+  if (asset.preview_url) return asset.preview_url;
+  if (
+    asset.kind === "image"
+    && asset.source_type === "remote"
+    && asset.source_url?.startsWith("https://")
+  ) return asset.source_url;
+  return null;
+}
+
 function makeButton(label, className, onClick, disabled = false) {
   const button = document.createElement("button");
   button.type = "button";
@@ -118,6 +130,57 @@ function makeButton(label, className, onClick, disabled = false) {
   button.disabled = disabled;
   if (onClick) button.addEventListener("click", onClick);
   return button;
+}
+
+function setupNativeClipboard() {
+  for (const field of $$('input:not([type="file"]):not([type="checkbox"]), textarea')) {
+    for (const eventName of ["copy", "cut"]) {
+      field.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    field.addEventListener("paste", (event) => {
+      event.stopPropagation();
+      const clipboardText = event.clipboardData?.getData("text/plain");
+      if (clipboardText == null) return;
+      event.preventDefault();
+      const start = field.selectionStart ?? field.value.length;
+      const end = field.selectionEnd ?? start;
+      const available = field.maxLength > 0
+        ? Math.max(0, field.maxLength - (field.value.length - (end - start)))
+        : clipboardText.length;
+      field.setRangeText(clipboardText.slice(0, available), start, end, "end");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+}
+
+async function copyPrompt() {
+  const prompt = $("#prompt");
+  const selected = prompt.value.slice(prompt.selectionStart, prompt.selectionEnd);
+  const text = selected || prompt.value;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(text);
+    toast(selected ? "Selected prompt text copied." : "Prompt copied.");
+  } catch (error) {
+    prompt.focus();
+    prompt.select();
+    const copied = document.execCommand?.("copy");
+    toast(copied ? "Prompt copied." : "Use Ctrl/Cmd+C to copy the selected prompt.", !copied);
+  }
+}
+
+async function pastePrompt() {
+  const prompt = $("#prompt");
+  try {
+    if (!navigator.clipboard?.readText) throw new Error("Clipboard API unavailable");
+    const text = await navigator.clipboard.readText();
+    prompt.setRangeText(text, prompt.selectionStart, prompt.selectionEnd, "end");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    prompt.focus();
+  } catch (error) {
+    prompt.focus();
+    toast("Clipboard access was unavailable. Use Ctrl/Cmd+V in the focused prompt field.", true);
+  }
 }
 
 async function loadHealth() {
@@ -160,6 +223,29 @@ async function loadAssets() {
   renderAttached();
 }
 
+function openRenameDialog(asset) {
+  state.renamingAssetId = asset.id;
+  const form = $("#rename-form");
+  form.reset();
+  const input = $("input[name='name']", form);
+  const text = $("textarea[name='text']", form);
+  const url = $("input[name='url']", form);
+  const textRow = $("#edit-text-row");
+  const urlRow = $("#edit-url-row");
+  input.value = asset.name;
+  textRow.hidden = asset.source_type !== "text";
+  urlRow.hidden = !["remote", "mm_file"].includes(asset.source_type);
+  text.required = !textRow.hidden;
+  url.required = !urlRow.hidden;
+  text.value = asset.text || "";
+  url.value = asset.source_url || "";
+  $("textarea[name='notes']", form).value = asset.notes || "";
+  $("input[name='tags']", form).value = (asset.tags || []).join(", ");
+  $("#rename-dialog").showModal();
+  input.focus();
+  input.select();
+}
+
 function renderAssets() {
   const list = $("#asset-list");
   const search = $("#asset-search").value.trim().toLowerCase();
@@ -189,11 +275,13 @@ function renderAssets() {
     card.className = "asset-card";
     const thumb = document.createElement("div");
     thumb.className = "asset-thumb";
-    if (asset.kind === "image" && asset.preview_url) {
+    const imageUrl = imagePreviewUrl(asset);
+    if (asset.kind === "image" && imageUrl) {
       const image = document.createElement("img");
-      image.src = asset.preview_url;
+      image.src = imageUrl;
       image.alt = "";
       image.loading = "lazy";
+      image.referrerPolicy = "no-referrer";
       thumb.append(image);
     } else if (asset.kind === "video" && asset.preview_url) {
       const video = document.createElement("video");
@@ -219,6 +307,7 @@ function renderAssets() {
     actions.append(
       makeButton(asset.kind === "text" ? "Use prompt" : "Attach", "micro-button", () => attachAsset(asset.id))
     );
+    actions.append(makeButton("Edit", "micro-button", () => openRenameDialog(asset)));
     if (asset.source_type === "local") {
       actions.append(
         makeButton(
@@ -296,6 +385,19 @@ function renderAttached() {
     if (!asset) continue;
     const row = document.createElement("div");
     row.className = "attached-item";
+    const thumb = document.createElement("div");
+    thumb.className = "attached-thumb";
+    const imageUrl = imagePreviewUrl(asset);
+    if (asset.kind === "image" && imageUrl) {
+      const image = document.createElement("img");
+      image.src = imageUrl;
+      image.alt = "";
+      image.loading = "lazy";
+      image.referrerPolicy = "no-referrer";
+      thumb.append(image);
+    } else {
+      thumb.textContent = kindLabel(asset.kind);
+    }
     const name = document.createElement("strong");
     name.textContent = asset.name;
     name.title = asset.name;
@@ -321,7 +423,7 @@ function renderAttached() {
       invalidatePreview();
     });
     remove.setAttribute("aria-label", `Remove ${asset.name}`);
-    row.append(name, select, remove);
+    row.append(thumb, name, select, remove);
     list.append(row);
   }
   updateMode();
@@ -352,9 +454,13 @@ function enforceRatioMode() {
   const frameMode = state.attached.some(
     (item) => item.role === "first_frame" || item.role === "last_frame",
   );
-  ratio.disabled = frameMode;
-  if (frameMode) ratio.value = "adaptive";
-  if (!frameMode && !state.attached.length && ratio.value === "adaptive") ratio.value = "16:9";
+  if (frameMode && !state.frameMode) ratio.value = "adaptive";
+  if (!frameMode && state.frameMode && ratio.value === "adaptive") ratio.value = "16:9";
+  state.frameMode = frameMode;
+  ratio.disabled = false;
+  $("#ratio-help").textContent = frameMode
+    ? "Adaptive keeps the original frame. A concrete ratio center-crops local frames without stretching."
+    : "Choose the requested output frame.";
 }
 
 function updatePromptCount() {
@@ -667,6 +773,64 @@ async function loadJobs() {
   renderJobs();
 }
 
+function workspaceRequest(job) {
+  if (Array.isArray(job.request?.content)) return job.request;
+  if (job.request?.source_task_id) {
+    return state.jobs.find((candidate) => candidate.task_id === job.request.source_task_id)?.request;
+  }
+  return null;
+}
+
+function loadRequestIntoWorkspace(job) {
+  const request = workspaceRequest(job);
+  const content = request?.content;
+  if (!Array.isArray(content)) {
+    toast("This synced record does not contain a reconstructable local request.", true);
+    return;
+  }
+  const promptItem = content.find((item) => item.type === "text" && item.text);
+  if (!promptItem) {
+    toast("This request has no reusable text prompt.", true);
+    return;
+  }
+
+  const missing = [];
+  const attached = [];
+  for (const item of content.filter((candidate) => candidate.type !== "text")) {
+    const asset = state.assets.find((candidate) => candidate.id === item.asset_id);
+    if (!asset) {
+      missing.push(item.asset_id || item.type);
+      continue;
+    }
+    attached.push({ assetId: asset.id, kind: asset.kind, role: item.role || defaultRole(asset) });
+  }
+
+  $("#prompt").value = promptItem.text;
+  state.attached = attached;
+  state.frameMode = false;
+  if (request.resolution && $(`#resolution option[value='${request.resolution}']`)) {
+    $("#resolution").value = request.resolution;
+  }
+  if (request.duration && $(`#duration option[value='${request.duration}']`)) {
+    $("#duration").value = String(request.duration);
+  }
+  $("#watermark").checked = Boolean(request.aigc_watermark);
+  enforceRatioMode();
+  if (request.ratio && $(`#ratio option[value='${request.ratio}']`)) {
+    $("#ratio").value = request.ratio;
+  }
+  updatePromptCount();
+  renderAttached();
+  invalidatePreview();
+  $(".composer-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  toast(
+    missing.length
+      ? `Request loaded with ${missing.length} missing source item(s). Reattach them before review.`
+      : `Request ${job.task_id} loaded as a new workspace intent.`,
+    Boolean(missing.length),
+  );
+}
+
 function jobTask(job) {
   return job.response?.task || {};
 }
@@ -756,6 +920,11 @@ function renderJobs() {
 
     const actions = document.createElement("div");
     actions.className = "job-actions";
+    if (workspaceRequest(job)) {
+      actions.append(
+        makeButton("Load workspace", "micro-button", () => loadRequestIntoWorkspace(job)),
+      );
+    }
     actions.append(
       makeButton("Refresh", "micro-button", () => refreshJob(job.task_id)),
     );
@@ -1038,6 +1207,42 @@ function setupDialogs() {
       toast(error.message, true);
     }
   });
+
+  $("#rename-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (event.submitter?.value === "cancel") {
+      state.renamingAssetId = null;
+      $("#rename-dialog").close("cancel");
+      return;
+    }
+    const assetId = state.renamingAssetId;
+    const form = new FormData(event.currentTarget);
+    if (!assetId) return;
+    const asset = state.assets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const body = {
+      name: String(form.get("name") || "").trim(),
+      notes: String(form.get("notes") || ""),
+      tags: String(form.get("tags") || "").split(",").map((tag) => tag.trim()).filter(Boolean),
+    };
+    if (asset.source_type === "text") body.text = String(form.get("text") || "");
+    if (["remote", "mm_file"].includes(asset.source_type)) {
+      body.url = String(form.get("url") || "").trim();
+    }
+    try {
+      await api(`/api/assets/${encodeURIComponent(assetId)}`, {
+        method: "PATCH",
+        body,
+      });
+      state.renamingAssetId = null;
+      $("#rename-dialog").close("default");
+      await loadAssets();
+      if (state.attached.some((item) => item.assetId === assetId)) invalidatePreview();
+      toast("Input updated.");
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
 }
 
 function setupEvents() {
@@ -1082,6 +1287,8 @@ function setupEvents() {
     updatePromptCount();
     invalidatePreview();
   });
+  $("#copy-prompt").addEventListener("click", copyPrompt);
+  $("#paste-prompt").addEventListener("click", pastePrompt);
   for (const id of ["resolution", "duration", "ratio", "watermark"]) {
     $(`#${id}`).addEventListener("change", () => {
       updateCost();
@@ -1119,6 +1326,7 @@ async function init() {
   }
   setupDialogs();
   setupEvents();
+  setupNativeClipboard();
   updatePromptCount();
   updateCost();
   state.polling = $("#polling-toggle").checked;

@@ -74,8 +74,11 @@ duration; the UI never substitutes a cheaper default duration.
 - Model is fixed to `MiniMax-H3`.
 - Exactly one non-empty prompt, at most 7,000 characters.
 - Resolution is `768P` or `2K`; duration is an integer from 4 through 15 seconds.
-- Text-only requests require a concrete ratio. Frame-based requests use `adaptive`. Reference
-  requests may use `adaptive` or a concrete supported ratio.
+- Text-only requests require a concrete ratio. Frame-based provider requests use `adaptive`.
+  Choosing a concrete ratio for a local JPEG/PNG/WebP first/last frame performs a centered local
+  crop without resampling or stretching, then sends the cropped frame with provider ratio
+  `adaptive`; remote and `mm_file://` frames are never fetched for cropping. Reference requests may
+  use `adaptive` or a concrete supported ratio.
 - Frame roles and reference roles cannot mix.
 - At most one first frame, one last frame, nine reference images, three reference videos, and three
   reference audio clips. Reference audio cannot be the only reference medium.

@@ -48,6 +48,12 @@ textarea {
   font: inherit;
 }
 
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 button,
 label,
 select {
@@ -208,6 +214,20 @@ button:disabled {
   padding: 20px;
   align-self: start;
   max-height: calc(100vh - 104px);
+}
+
+.library-panel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 104px);
+  height: calc(100dvh - 104px);
+  min-height: 680px;
+  max-height: none;
+  position: relative;
+  overflow: hidden;
+}
+
+.tasks-panel {
   position: sticky;
   top: 90px;
   overflow: auto;
@@ -474,6 +494,15 @@ button:disabled {
   margin-top: 12px;
 }
 
+.asset-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-right: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 .empty-state {
   padding: 28px 14px;
   border: 1px solid var(--line);
@@ -622,6 +651,11 @@ button:disabled {
   border-top: 1px solid var(--line);
 }
 
+.prompt-tools {
+  display: inline-flex;
+  gap: 10px;
+}
+
 .text-button {
   border: 0;
   padding: 0;
@@ -662,13 +696,31 @@ button:disabled {
 
 .attached-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 155px auto;
+  grid-template-columns: 42px minmax(0, 1fr) 155px auto;
   gap: 9px;
   align-items: center;
   padding: 9px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--paper);
+}
+
+.attached-thumb {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--paper-deep);
+  color: var(--green);
+  font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.attached-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .attached-item strong {
@@ -715,6 +767,12 @@ button:disabled {
 .settings-grid label {
   display: grid;
   gap: 6px;
+}
+
+.settings-grid label > small {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
 }
 
 .settings-grid select,
@@ -1078,6 +1136,10 @@ button:disabled {
   padding: 22px;
 }
 
+.modal [hidden] {
+  display: none !important;
+}
+
 .modal-heading h2 {
   font-size: 25px;
 }
@@ -1296,7 +1358,18 @@ summary:focus-visible,
   .tasks-panel {
     position: relative;
     top: auto;
+    height: auto;
+    min-height: 0;
     max-height: none;
+    overflow: visible;
+  }
+
+  .library-panel {
+    display: block;
+  }
+
+  .asset-list {
+    overflow: visible;
   }
 
   .composer-panel,
@@ -1329,7 +1402,7 @@ summary:focus-visible,
   }
 
   .attached-item {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
   }
 
   .attached-item select {

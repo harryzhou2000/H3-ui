@@ -8,7 +8,6 @@ import pytest
 
 from app.config import OFFICIAL_MINIMAX_API_BASE_URL, Settings
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 

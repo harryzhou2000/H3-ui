@@ -56,6 +56,14 @@ class AssetUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     notes: str | None = Field(default=None, max_length=1000)
     tags: list[str] | None = Field(default=None, max_length=20)
+    text: str | None = Field(default=None, min_length=1, max_length=7000)
+    url: str | None = Field(default=None, min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def one_editable_value(self) -> AssetUpdate:
+        if self.text is not None and self.url is not None:
+            raise ValueError("Edit either text or URL, not both")
+        return self
 
 
 Role = Literal[
@@ -76,7 +84,7 @@ class ComposerItem(BaseModel):
     role: Role | None = None
 
     @model_validator(mode="after")
-    def validate_source(self) -> "ComposerItem":
+    def validate_source(self) -> ComposerItem:
         sources = sum(bool(value) for value in (self.text, self.asset_id, self.url))
         if sources != 1:
             raise ValueError("Each content item must have exactly one of text, asset_id, or url")
@@ -123,7 +131,7 @@ class RegenerationCreate(BaseModel):
     confirmed: bool = False
 
     @model_validator(mode="after")
-    def exactly_one_source(self) -> "RegenerationCreate":
+    def exactly_one_source(self) -> RegenerationCreate:
         if bool(self.source_task_id) == bool(self.content):
             raise ValueError("Provide exactly one of source_task_id or content")
         return self
