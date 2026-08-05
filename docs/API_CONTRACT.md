@@ -14,6 +14,11 @@ All provider requests use `https://api.minimaxi.com` and server-side Bearer auth
 The browser has only purpose-built local `/api/*` routes and cannot choose an upstream host, path,
 method, header, or key.
 
+Reusable prompt formats and media-label ordering are documented in:
+
+- [REF2VA prompt template](H3_REF2VA_PROMPT_TEMPLATE.md)
+- [I2VA and FL2VA prompt templates](H3_I2VA_FL2VA_PROMPT_TEMPLATE.md)
+
 The browser persists only opaque billable-attempt IDs in per-tab session storage so a reload after
 a lost response reuses the backend ledger entry without another tab overwriting it. Billable task
 creation fails closed if storage cannot be verified. The server accepts one exact configured

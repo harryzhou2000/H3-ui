@@ -16,7 +16,7 @@ import {
 } from "../app/static/attachments.mjs";
 
 
-test("reference media labels are English, type-qualified, and one-based", () => {
+test("reference media labels use exact H3 tags and independent one-based ordinals", () => {
   const items = [
     { assetId: "image-a", role: "reference_image" },
     { assetId: "video-a", role: "reference_video" },
@@ -27,12 +27,26 @@ test("reference media labels are English, type-qualified, and one-based", () => 
   assert.deepEqual(
     items.map((_, index) => attachmentLabel(items, index)),
     [
-      "Reference image 1",
-      "Reference video 1",
-      "Reference image 2",
-      "Reference audio 1",
-      "First frame",
+      "<Picture 1>",
+      "<Video 1>",
+      "<Picture 2>",
+      "<Audio 1>",
+      "<Picture 1>",
     ],
+  );
+});
+
+
+test("endpoint frame tags follow I2VA, FL2VA, and L2VA numbering", () => {
+  const firstAndLast = [
+    { assetId: "opening", role: "first_frame" },
+    { assetId: "closing", role: "last_frame" },
+  ];
+  assert.equal(attachmentLabel(firstAndLast, 0), "<Picture 1>");
+  assert.equal(attachmentLabel(firstAndLast, 1), "<Picture 2>");
+  assert.equal(
+    attachmentLabel([{ assetId: "closing", role: "last_frame" }], 0),
+    "<Picture 1>",
   );
 });
 

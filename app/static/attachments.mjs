@@ -1,23 +1,25 @@
-const ROLE_LABELS = {
-  first_frame: "First frame",
-  last_frame: "Last frame",
-  reference_image: "Reference image",
-  reference_video: "Reference video",
-  reference_audio: "Reference audio",
-  base_video: "Base video",
+const REFERENCE_TAGS = {
+  reference_image: "Picture",
+  reference_video: "Video",
+  reference_audio: "Audio",
 };
 
 
 export function attachmentLabel(items, index) {
   const item = items[index];
   if (!item) return "Media input";
-  const base = ROLE_LABELS[item.role] || "Media input";
-  if (!item.role?.startsWith("reference_")) return base;
+  if (item.role === "first_frame") return "<Picture 1>";
+  if (item.role === "last_frame") {
+    const ordinal = items.some((candidate) => candidate.role === "first_frame") ? 2 : 1;
+    return `<Picture ${ordinal}>`;
+  }
+  const tag = REFERENCE_TAGS[item.role];
+  if (!tag) return item.role === "base_video" ? "Base video" : "Media input";
   const ordinal = items
     .slice(0, index + 1)
     .filter((candidate) => candidate.role === item.role)
     .length;
-  return `${base} ${ordinal}`;
+  return `<${tag} ${ordinal}>`;
 }
 
 
