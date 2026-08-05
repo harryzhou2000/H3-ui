@@ -5,6 +5,7 @@ import {
   taskPresentationChanged,
 } from "./pool.mjs";
 import { generationCharges, regenerationCharges } from "./billing.mjs";
+import { attachmentLabel, reorderAttachedItems } from "./attachments.mjs";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -432,6 +433,15 @@ function roleOptions(kind) {
   return [["reference_audio", "Reference audio"]];
 }
 
+function moveAttachedItem(fromIndex, toIndex, { announce = false } = {}) {
+  const reordered = reorderAttachedItems(state.attached, fromIndex, toIndex);
+  if (reordered === state.attached) return;
+  state.attached = reordered;
+  renderAttached();
+  invalidatePreview();
+  if (announce) toast(`Moved ${attachmentLabel(state.attached, toIndex)}.`);
+}
+
 function renderAttached() {
   const list = $("#attached-list");
   list.replaceChildren();
@@ -444,11 +454,61 @@ function renderAttached() {
     updateMode();
     return;
   }
-  for (const attached of state.attached) {
+  for (const [attachedIndex, attached] of state.attached.entries()) {
     const asset = state.assets.find((item) => item.id === attached.assetId);
     if (!asset) continue;
+    const referenceLabel = attachmentLabel(state.attached, attachedIndex);
     const row = document.createElement("div");
     row.className = "attached-item";
+    row.dataset.assetId = attached.assetId;
+    const dragHandle = makeButton("⋮⋮", "drag-handle");
+    dragHandle.draggable = true;
+    dragHandle.title = `Drag to reorder ${referenceLabel}`;
+    dragHandle.setAttribute(
+      "aria-label",
+      `Reorder ${referenceLabel}. Drag, or use the Up and Down arrow keys.`,
+    );
+    dragHandle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      const offset = event.key === "ArrowUp" ? -1 : 1;
+      moveAttachedItem(attachedIndex, attachedIndex + offset, { announce: true });
+      const moved = state.attached[attachedIndex + offset];
+      if (moved) {
+        $(`.attached-item[data-asset-id="${CSS.escape(moved.assetId)}"] .drag-handle`)?.focus();
+      }
+    });
+    dragHandle.addEventListener("dragstart", (event) => {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", attached.assetId);
+      row.classList.add("is-dragging");
+    });
+    dragHandle.addEventListener("dragend", () => {
+      for (const item of $$(".attached-item")) {
+        item.classList.remove("is-dragging", "drop-before", "drop-after");
+      }
+    });
+    row.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const after = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+      row.classList.toggle("drop-before", !after);
+      row.classList.toggle("drop-after", after);
+    });
+    row.addEventListener("dragleave", () => {
+      row.classList.remove("drop-before", "drop-after");
+    });
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const draggedAssetId = event.dataTransfer.getData("text/plain");
+      const fromIndex = state.attached.findIndex((item) => item.assetId === draggedAssetId);
+      const targetIndex = state.attached.findIndex((item) => item === attached);
+      const after = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+      let toIndex = targetIndex + (after ? 1 : 0);
+      if (fromIndex < toIndex) toIndex -= 1;
+      toIndex = Math.min(Math.max(toIndex, 0), state.attached.length - 1);
+      moveAttachedItem(fromIndex, toIndex);
+    });
     const thumb = document.createElement("div");
     thumb.className = "attached-thumb";
     const imageUrl = imagePreviewUrl(asset);
@@ -462,9 +522,15 @@ function renderAttached() {
     } else {
       thumb.textContent = kindLabel(asset.kind);
     }
+    const info = document.createElement("div");
+    info.className = "attached-info";
+    const label = document.createElement("span");
+    label.className = "media-reference-label";
+    label.textContent = referenceLabel;
     const name = document.createElement("strong");
     name.textContent = asset.name;
     name.title = asset.name;
+    info.append(label, name);
     const select = document.createElement("select");
     select.setAttribute("aria-label", `Role for ${asset.name}`);
     for (const [value, label] of roleOptions(attached.kind)) {
@@ -477,7 +543,7 @@ function renderAttached() {
     select.addEventListener("change", () => {
       attached.role = select.value;
       enforceRatioMode();
-      updateMode();
+      renderAttached();
       invalidatePreview();
     });
     const remove = makeButton("×", "remove-attached", () => {
@@ -487,7 +553,7 @@ function renderAttached() {
       invalidatePreview();
     });
     remove.setAttribute("aria-label", `Remove ${asset.name}`);
-    row.append(thumb, name, select, remove);
+    row.append(dragHandle, thumb, info, select, remove);
     list.append(row);
   }
   updateMode();

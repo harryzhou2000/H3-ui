@@ -10,6 +10,40 @@ import {
   generationCharges,
   regenerationCharges,
 } from "../app/static/billing.mjs";
+import {
+  attachmentLabel,
+  reorderAttachedItems,
+} from "../app/static/attachments.mjs";
+
+
+test("reference media labels are English, type-qualified, and one-based", () => {
+  const items = [
+    { assetId: "image-a", role: "reference_image" },
+    { assetId: "video-a", role: "reference_video" },
+    { assetId: "image-b", role: "reference_image" },
+    { assetId: "audio-a", role: "reference_audio" },
+    { assetId: "frame-a", role: "first_frame" },
+  ];
+  assert.deepEqual(
+    items.map((_, index) => attachmentLabel(items, index)),
+    [
+      "Reference image 1",
+      "Reference video 1",
+      "Reference image 2",
+      "Reference audio 1",
+      "First frame",
+    ],
+  );
+});
+
+
+test("attached media can be reordered without mutating the original array", () => {
+  const items = [{ assetId: "a" }, { assetId: "b" }, { assetId: "c" }];
+  const reordered = reorderAttachedItems(items, 0, 2);
+  assert.deepEqual(reordered.map((item) => item.assetId), ["b", "c", "a"]);
+  assert.deepEqual(items.map((item) => item.assetId), ["a", "b", "c"]);
+  assert.equal(reorderAttachedItems(items, 1, 1), items);
+});
 
 
 test("billable request IDs stay stable until a scene changes or submission succeeds", () => {

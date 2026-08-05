@@ -106,6 +106,7 @@ def test_source_shelf_owns_a_bounded_scroll_region_on_desktop() -> None:
     styles = (ROOT / "app" / "static" / "styles.css").read_text(encoding="utf-8")
     library_rule = styles.split(".library-panel {", 1)[1].split("}", 1)[0]
     asset_rule = styles.split(".asset-list {", 1)[1].split("}", 1)[0]
+    filter_rule = styles.split(".segmented-compact {", 1)[1].split("}", 1)[0]
 
     assert "display: flex" in library_rule
     assert "height: calc(100dvh - 104px)" in library_rule
@@ -115,6 +116,8 @@ def test_source_shelf_owns_a_bounded_scroll_region_on_desktop() -> None:
     assert "min-height: 0" in asset_rule
     assert "overflow-y: auto" in asset_rule
     assert "overscroll-behavior: contain" in asset_rule
+    assert "flex: 0 0 auto" in filter_rule
+    assert "min-height: 33px" in filter_rule
 
 
 def test_attached_images_have_thumbnails_and_all_assets_have_edit_controls() -> None:
@@ -125,6 +128,20 @@ def test_attached_images_have_thumbnails_and_all_assets_have_edit_controls() -> 
     assert 'image.referrerPolicy = "no-referrer"' in browser_source
     assert 'makeButton("Edit"' in browser_source
     assert 'method: "PATCH"' in browser_source
+
+
+def test_attached_media_expose_reference_labels_and_accessible_reordering() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        'import { attachmentLabel, reorderAttachedItems } from "./attachments.mjs"'
+        in browser_source
+    )
+    assert 'label.className = "media-reference-label"' in browser_source
+    assert "dragHandle.draggable = true" in browser_source
+    assert 'dragHandle.addEventListener("dragstart"' in browser_source
+    assert 'row.addEventListener("drop"' in browser_source
+    assert 'event.key !== "ArrowUp" && event.key !== "ArrowDown"' in browser_source
 
 
 def test_asset_editor_is_type_specific_and_resizes_local_images_as_copies() -> None:
