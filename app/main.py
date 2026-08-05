@@ -33,6 +33,7 @@ from app.schemas import (
     AssetRecord,
     AssetUpdate,
     ContextIRCreate,
+    ImageResizeCreate,
     JobRecord,
     ProviderFilePublish,
     RegenerationCreate,
@@ -398,6 +399,14 @@ def create_app(
         updates = body.model_dump(exclude_none=True)
         updated = media.update_asset(existing, updates)
         return media.present_asset(updated or existing)
+
+    @app.post("/api/assets/{asset_id}/resize", response_model=AssetRecord, status_code=201)
+    async def resize_image_asset(asset_id: str, body: ImageResizeCreate) -> AssetRecord:
+        existing = store.get_asset(asset_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        resized = media.create_resized_image_copy(existing, body.ratio, body.max_edge)
+        return media.present_asset(resized)
 
     @app.get("/api/assets/{asset_id}/content")
     async def asset_content(asset_id: str, request: Request) -> StreamingResponse:
@@ -838,7 +847,7 @@ def create_app(
         if path.parent != settings.downloads_dir.resolve() or not path.is_file():
             raise HTTPException(status_code=404, detail="File not found")
         return _stream_local_file(
-            request, path, media_type="video/mp4", filename=filename, inline=False
+            request, path, media_type="video/mp4", filename=filename, inline=True
         )
 
     static_dir = Path(__file__).resolve().parent / "static"

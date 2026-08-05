@@ -127,11 +127,32 @@ def test_attached_images_have_thumbnails_and_all_assets_have_edit_controls() -> 
     assert 'method: "PATCH"' in browser_source
 
 
+def test_asset_editor_is_type_specific_and_resizes_local_images_as_copies() -> None:
+    index = _index()
+    by_id = {attrs["id"]: (tag, attrs) for tag, attrs in index.nodes if attrs.get("id")}
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    styles = (ROOT / "app" / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert by_id["edit-image-preview-row"][0] == "section"
+    assert by_id["edit-image-preview"][0] == "img"
+    assert by_id["edit-image-resize-row"][0] == "section"
+    assert '$("#rename-dialog-title").textContent = `Edit ${asset.kind}`' in browser_source
+    assert 'asset.kind === "image" && asset.source_type === "local"' in browser_source
+    assert "imagePreviewRow.hidden = !previewUrl" in browser_source
+    assert "/resize`" in browser_source
+    assert 'value="resize"' in (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "The original stays unchanged" in (ROOT / "app" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert ".asset-editor-preview" in styles
+    assert ".asset-editor-resize[hidden]" in styles
+
+
 def test_frame_ratio_ui_offers_local_center_crop_without_disabling_ratio() -> None:
     browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "ratio.disabled = false" in browser_source
-    assert "center-crops local frames without stretching" in browser_source
+    assert "locally crops and downsizes oversized frames without stretching" in browser_source
 
 
 def test_text_fields_preserve_native_clipboard_and_offer_prompt_buttons() -> None:
@@ -164,3 +185,42 @@ def test_saved_requests_can_be_loaded_as_fresh_workspace_intents() -> None:
     assert "state.attached = attached" in loader
     assert "invalidatePreview()" in loader
     assert "loaded as a new workspace intent" in loader
+
+
+def test_errors_use_a_frontmost_modal_top_layer() -> None:
+    index = _index()
+    by_id = {attrs["id"]: (tag, attrs) for tag, attrs in index.nodes if attrs.get("id")}
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    toast_source = browser_source.split("function toast(message, isError = false)", 1)[1].split(
+        "function setBusy", 1
+    )[0]
+
+    assert by_id["error-dialog"][0] == "dialog"
+    assert by_id["error-dialog"][1]["aria-describedby"] == "error-dialog-message"
+    assert "dialog.showModal()" in toast_source
+    assert '$("#error-dialog-message").textContent = message' in toast_source
+
+
+def test_input_and_output_videos_open_in_new_preview_windows() -> None:
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "function videoPreviewUrl(asset)" in browser_source
+    assert "function openVideoPreview(url)" in browser_source
+    assert "function previewOutput(job)" in browser_source
+    assert 'window.open("about:blank", "_blank")' in browser_source
+    assert 'makeButton("Preview video"' in browser_source
+    assert "Creating a local preview copy" in browser_source
+
+
+def test_completed_ir_text_can_be_viewed_copied_and_used_as_direction() -> None:
+    index = _index()
+    by_id = {attrs["id"]: (tag, attrs) for tag, attrs in index.nodes if attrs.get("id")}
+    browser_source = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert by_id["ir-result-dialog"][0] == "dialog"
+    assert by_id["ir-result-text"][0] == "textarea"
+    assert "function irResultText(job)" in browser_source
+    assert '"View IR text"' in browser_source
+    assert "openIrResult(job)" in browser_source
+    assert "navigator.clipboard.writeText(field.value)" in browser_source
+    assert '$("#prompt").value = text' in browser_source

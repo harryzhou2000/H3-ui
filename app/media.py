@@ -57,19 +57,24 @@ ASPECT_RATIOS = {
     "9:16": (9, 16),
 }
 MAX_CROP_PIXELS = 80_000_000
+MAX_LOCAL_IMAGE_EDGE = 4096
 
 
 class ValidationError(ValueError):
     pass
 
 
-def crop_image_to_ratio(path: Path, ratio: str) -> tuple[bytes, str]:
-    """Center-crop a local image without stretching or resampling it."""
+def crop_image_to_ratio(
+    path: Path, ratio: str, *, max_edge: int = MAX_LOCAL_IMAGE_EDGE
+) -> tuple[bytes, str]:
+    """Center-crop locally, then downscale oversized images without stretching."""
 
     try:
         ratio_width, ratio_height = ASPECT_RATIOS[ratio]
     except KeyError as exc:
         raise ValidationError(f"Unsupported crop ratio: {ratio}") from exc
+    if max_edge < 1:
+        raise ValidationError("Local image resize limit must be positive")
 
     try:
         with Image.open(path) as opened:
@@ -89,6 +94,8 @@ def crop_image_to_ratio(path: Path, ratio: str) -> tuple[bytes, str]:
                 top = (height - crop_height) // 2
                 box = (0, top, width, top + crop_height)
             cropped = image.crop(box)
+            if max(cropped.size) > max_edge:
+                cropped.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
 
             output = BytesIO()
             if source_format in {"JPEG", "JPG"}:
@@ -294,6 +301,50 @@ class MediaService:
                 "provider_expires_at": None,
             }
         )
+
+    def create_resized_image_copy(
+        self, asset: dict[str, Any], ratio: str, max_edge: int
+    ) -> dict[str, Any]:
+        """Create a derived local image without changing or fetching the source."""
+
+        if asset["kind"] != AssetKind.image.value:
+            raise ValidationError("Only image assets can create resized image copies")
+        if asset["source_type"] != AssetSource.local.value:
+            raise ValidationError("Image resizing requires a local image asset")
+
+        source_path = self.local_path(asset)
+        if not source_path.is_file():
+            raise ValidationError("Local image file is missing")
+        raw, mime = crop_image_to_ratio(source_path, ratio, max_edge=max_edge)
+        extensions = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }
+        extension = extensions[mime]
+        asset_id = uuid.uuid4().hex
+        stored_name = f"{asset_id}{extension}"
+        destination = self.settings.assets_dir / stored_name
+        try:
+            with destination.open("xb") as handle:
+                handle.write(raw)
+            return self.store.insert_asset(
+                {
+                    "id": asset_id,
+                    "kind": AssetKind.image.value,
+                    "name": f"{asset['name']} ({ratio}, max {max_edge}px)"[:160],
+                    "source_type": AssetSource.local.value,
+                    "value": stored_name,
+                    "mime_type": mime,
+                    "size": len(raw),
+                    "notes": asset.get("notes", ""),
+                    "tags": list(asset.get("tags", [])),
+                    "created_at": int(time.time()),
+                }
+            )
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
 
     def delete_asset(self, asset_id: str) -> dict[str, Any] | None:
         asset = self.store.delete_asset(asset_id)

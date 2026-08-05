@@ -66,6 +66,11 @@ class AssetUpdate(BaseModel):
         return self
 
 
+class ImageResizeCreate(BaseModel):
+    ratio: Literal["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
+    max_edge: int = Field(default=2048, ge=32, le=4096)
+
+
 Role = Literal[
     "first_frame",
     "last_frame",

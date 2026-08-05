@@ -318,12 +318,12 @@
       </form>
     </dialog>
 
-    <dialog id="rename-dialog" class="modal" aria-labelledby="rename-dialog-title">
+    <dialog id="rename-dialog" class="modal asset-editor-modal" aria-labelledby="rename-dialog-title">
       <form method="dialog" id="rename-form">
         <div class="modal-heading">
           <div>
             <p class="eyebrow">Source shelf</p>
-            <h2 id="rename-dialog-title">Edit input</h2>
+            <h2 id="rename-dialog-title">Edit source</h2>
           </div>
           <button class="modal-close" type="submit" value="cancel" formnovalidate aria-label="Close">×</button>
         </div>
@@ -339,6 +339,38 @@
           <span>Public URL or MiniMax file ID</span>
           <input name="url" maxlength="4096" />
         </label>
+        <section id="edit-image-preview-row" class="asset-editor-preview" hidden>
+          <img id="edit-image-preview" alt="Image source preview" referrerpolicy="no-referrer" />
+        </section>
+        <section id="edit-image-resize-row" class="asset-editor-resize" hidden>
+          <div>
+            <p class="eyebrow">Local image tools</p>
+            <h3>Create a cropped copy</h3>
+            <p>Center-crop to an exact aspect ratio and downsize locally. The original stays unchanged.</p>
+          </div>
+          <div class="asset-editor-resize-fields">
+            <label>
+              <span>Aspect ratio</span>
+              <select name="resize_ratio">
+                <option value="16:9">16:9</option>
+                <option value="21:9">21:9</option>
+                <option value="4:3">4:3</option>
+                <option value="1:1">1:1</option>
+                <option value="3:4">3:4</option>
+                <option value="9:16">9:16</option>
+              </select>
+            </label>
+            <label>
+              <span>Maximum edge</span>
+              <select name="resize_max_edge">
+                <option value="1024">1,024 px</option>
+                <option value="2048" selected>2,048 px</option>
+                <option value="4096">4,096 px</option>
+              </select>
+            </label>
+          </div>
+          <button class="button button-secondary" type="submit" value="resize">Create local resized copy</button>
+        </section>
         <label>
           <span>Notes</span>
           <textarea name="notes" maxlength="1000" rows="3"></textarea>
@@ -367,6 +399,39 @@
         <div class="modal-actions">
           <button class="button button-quiet" type="submit" value="cancel" formnovalidate>Go back</button>
           <button id="confirm-submit" class="button button-accent" type="submit" value="default" disabled>Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="error-dialog" class="error-dialog" aria-labelledby="error-dialog-title" aria-describedby="error-dialog-message">
+      <form method="dialog">
+        <div class="error-dialog-heading">
+          <span aria-hidden="true">!</span>
+          <h2 id="error-dialog-title">Action needs attention</h2>
+        </div>
+        <p id="error-dialog-message"></p>
+        <button class="button button-primary" type="submit" value="close" formnovalidate>
+          Dismiss
+        </button>
+      </form>
+    </dialog>
+
+    <dialog id="ir-result-dialog" class="modal" aria-labelledby="ir-result-title">
+      <form method="dialog">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Context IR result</p>
+            <h2 id="ir-result-title">Returned text</h2>
+          </div>
+          <button class="modal-close" type="submit" value="close" formnovalidate aria-label="Close">×</button>
+        </div>
+        <label>
+          <span>Full enhanced prompt</span>
+          <textarea id="ir-result-text" rows="14" readonly></textarea>
+        </label>
+        <div class="modal-actions">
+          <button id="copy-ir-result" class="button button-secondary" type="button">Copy text</button>
+          <button id="use-ir-result" class="button button-primary" type="button">Use as Direction</button>
         </div>
       </form>
     </dialog>

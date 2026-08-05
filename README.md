@@ -35,8 +35,9 @@ See [.env.example](.env.example) for optional local runtime settings.
    shelf. Local assets and metadata persist under `data/`.
 2. Attach media, assign its role, and choose duration, ratio, resolution, and watermark settings.
    Attached local images show a thumbnail. In first/last-frame mode, `adaptive` preserves the
-   source shape; choosing a concrete ratio center-crops local JPEG/PNG/WebP frames without
-   stretching them. Remote and MiniMax file-ID frames are never fetched locally for cropping.
+   source shape; choosing a concrete ratio center-crops local JPEG/PNG/WebP frames and downsizes
+   oversized images locally without stretching them. Remote and MiniMax file-ID frames are never
+   fetched locally for cropping.
 3. Select **Review request**. This validates and previews the exact payload locally; it does not
    call MiniMax.
 4. Select **Generate video**, review the published base-price estimate, and explicitly acknowledge
@@ -51,8 +52,17 @@ See [.env.example](.env.example) for optional local runtime settings.
 Any local task card with a stored request has **Load workspace**. It restores the prompt, surviving
 source attachments and roles, output settings, and frame crop choice, then rotates to a fresh
 idempotency intent. Editing a source-shelf item can update names and metadata, text-prompt bodies,
-or public URL/file-ID values as appropriate; local media bytes remain immutable. Native clipboard
-shortcuts are preserved in all text fields, with explicit Copy/Paste controls on the main prompt.
+or public URL/file-ID values as appropriate. Image sources get an image-specific editor with a
+preview; local JPEG/PNG/WebP images can create a center-cropped, downsized copy at a selected aspect
+ratio and maximum edge while preserving the original. Native clipboard shortcuts are preserved in
+all text fields, with explicit Copy/Paste controls on the main prompt.
+
+Input videos with a local or public URL have **Preview video**, which opens the browser's native
+player in a separate window. Completed output previews first create or reuse a local MP4 copy, then
+open that local file in a new window; expiring signed provider URLs and Bearer credentials never
+reach the preview window. Completed Context IR tasks expose their full returned text with Copy and
+**Use as Direction** actions. Errors use a dedicated top-layer dialog so an open editor or
+confirmation window cannot hide them.
 
 MiniMax only permits “Kill” while a task is `queued`. Once a task reaches `running`, the documented
 API rejects cancellation, so the UI disables that action. Succeeded and failed remote records can
@@ -137,7 +147,8 @@ remains pinned rather than being selected from user-controlled provider URLs.
 ## API surface
 
 - `GET /api/health`, `POST /api/connection/test`
-- local asset CRUD under `/api/assets`, plus explicit `/api/assets/{id}/publish`
+- local asset CRUD under `/api/assets`, local-copy image resizing under
+  `/api/assets/{id}/resize`, plus explicit `/api/assets/{id}/publish`
 - `POST /api/jobs/preview`, `POST /api/jobs`
 - `GET /api/jobs`, `POST /api/jobs/{task_id}/refresh`
 - `DELETE /api/jobs/{task_id}/remote` and distinct local-history deletion

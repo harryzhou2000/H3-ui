@@ -76,9 +76,9 @@ duration; the UI never substitutes a cheaper default duration.
 - Resolution is `768P` or `2K`; duration is an integer from 4 through 15 seconds.
 - Text-only requests require a concrete ratio. Frame-based provider requests use `adaptive`.
   Choosing a concrete ratio for a local JPEG/PNG/WebP first/last frame performs a centered local
-  crop without resampling or stretching, then sends the cropped frame with provider ratio
-  `adaptive`; remote and `mm_file://` frames are never fetched for cropping. Reference requests may
-  use `adaptive` or a concrete supported ratio.
+  crop and locally downsizes oversized images without stretching, then sends the processed frame
+  with provider ratio `adaptive`; remote and `mm_file://` frames are never fetched for cropping.
+  Reference requests may use `adaptive` or a concrete supported ratio.
 - Frame roles and reference roles cannot mix.
 - At most one first frame, one last frame, nine reference images, three reference videos, and three
   reference audio clips. Reference audio cannot be the only reference medium.
@@ -89,6 +89,13 @@ duration; the UI never substitutes a cheaper default duration.
 Container codec, dimensions, media duration, aspect, and frame-rate checks are authoritative when
 MiniMax validates `video_generation_input`; this app does not pretend extension inspection proves
 those properties.
+
+## Local image editing
+
+`POST /api/assets/{asset_id}/resize` accepts a concrete supported `ratio` and a `max_edge` from 32
+through 4096 pixels. It operates only on local JPEG, PNG, or WebP image assets, center-crops and
+downscales with Pillow, stores a new local asset record and file, and leaves the original unchanged.
+It never fetches a remote asset or calls the provider.
 
 ## File deletion documentation caveat
 

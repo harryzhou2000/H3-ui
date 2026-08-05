@@ -68,8 +68,15 @@ async function api(path, options = {}) {
 }
 
 function toast(message, isError = false) {
+  if (isError) {
+    const dialog = $("#error-dialog");
+    $("#error-dialog-message").textContent = message;
+    if (dialog.open) dialog.close();
+    dialog.showModal();
+    return;
+  }
   const item = document.createElement("div");
-  item.className = `toast${isError ? " is-error" : ""}`;
+  item.className = "toast";
   item.textContent = message;
   $("#toast-region").append(item);
   window.setTimeout(() => item.remove(), 4800);
@@ -122,6 +129,15 @@ function imagePreviewUrl(asset) {
   return null;
 }
 
+function videoPreviewUrl(asset) {
+  if (asset.kind !== "video") return null;
+  if (asset.preview_url) return asset.preview_url;
+  if (asset.source_type === "remote" && /^https?:\/\//.test(asset.source_url || "")) {
+    return asset.source_url;
+  }
+  return null;
+}
+
 function makeButton(label, className, onClick, disabled = false) {
   const button = document.createElement("button");
   button.type = "button";
@@ -132,11 +148,23 @@ function makeButton(label, className, onClick, disabled = false) {
   return button;
 }
 
+function openVideoPreview(url) {
+  const previewWindow = window.open("about:blank", "_blank");
+  if (!previewWindow) {
+    toast("The browser blocked the video preview window. Allow pop-ups for H3 Studio.", true);
+    return null;
+  }
+  previewWindow.opener = null;
+  previewWindow.location.replace(url);
+  return previewWindow;
+}
+
 function setupNativeClipboard() {
   for (const field of $$('input:not([type="file"]):not([type="checkbox"]), textarea')) {
     for (const eventName of ["copy", "cut"]) {
       field.addEventListener(eventName, (event) => event.stopPropagation());
     }
+    if (field.readOnly) continue;
     field.addEventListener("paste", (event) => {
       event.stopPropagation();
       const clipboardText = event.clipboardData?.getData("text/plain");
@@ -232,9 +260,19 @@ function openRenameDialog(asset) {
   const url = $("input[name='url']", form);
   const textRow = $("#edit-text-row");
   const urlRow = $("#edit-url-row");
+  const imagePreviewRow = $("#edit-image-preview-row");
+  const imageResizeRow = $("#edit-image-resize-row");
+  const imagePreview = $("#edit-image-preview");
   input.value = asset.name;
+  $("#rename-dialog-title").textContent = `Edit ${asset.kind}`;
   textRow.hidden = asset.source_type !== "text";
   urlRow.hidden = !["remote", "mm_file"].includes(asset.source_type);
+  const previewUrl = asset.kind === "image" ? imagePreviewUrl(asset) : null;
+  imagePreviewRow.hidden = !previewUrl;
+  imageResizeRow.hidden = !(asset.kind === "image" && asset.source_type === "local");
+  imagePreview.removeAttribute("src");
+  if (previewUrl) imagePreview.src = previewUrl;
+  imagePreview.alt = `Preview of ${asset.name}`;
   text.required = !textRow.hidden;
   url.required = !urlRow.hidden;
   text.value = asset.text || "";
@@ -308,6 +346,12 @@ function renderAssets() {
       makeButton(asset.kind === "text" ? "Use prompt" : "Attach", "micro-button", () => attachAsset(asset.id))
     );
     actions.append(makeButton("Edit", "micro-button", () => openRenameDialog(asset)));
+    const previewUrl = videoPreviewUrl(asset);
+    if (previewUrl) {
+      actions.append(
+        makeButton("Preview video", "micro-button", () => openVideoPreview(previewUrl)),
+      );
+    }
     if (asset.source_type === "local") {
       actions.append(
         makeButton(
@@ -459,7 +503,7 @@ function enforceRatioMode() {
   state.frameMode = frameMode;
   ratio.disabled = false;
   $("#ratio-help").textContent = frameMode
-    ? "Adaptive keeps the original frame. A concrete ratio center-crops local frames without stretching."
+    ? "Adaptive keeps the original frame. A concrete ratio locally crops and downsizes oversized frames without stretching."
     : "Choose the requested output frame.";
 }
 
@@ -835,6 +879,47 @@ function jobTask(job) {
   return job.response?.task || {};
 }
 
+function irResultText(job) {
+  const task = jobTask(job);
+  const candidates = [task.content?.prompt, task.content?.text, task.prompt, task.text];
+  return candidates.find((value) => typeof value === "string" && value.trim()) || null;
+}
+
+function openIrResult(job) {
+  const text = irResultText(job);
+  if (!text) {
+    toast("The completed IR task did not include returned text. Refresh the task and try again.", true);
+    return;
+  }
+  $("#ir-result-text").value = text;
+  $("#ir-result-dialog").showModal();
+}
+
+async function copyIrResult() {
+  const field = $("#ir-result-text");
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(field.value);
+    toast("IR text copied.");
+  } catch (error) {
+    field.focus();
+    field.select();
+    const copied = document.execCommand?.("copy");
+    toast(copied ? "IR text copied." : "Use Ctrl/Cmd+C to copy the selected IR text.", !copied);
+  }
+}
+
+function useIrResultAsDirection() {
+  const text = $("#ir-result-text").value;
+  if (!text.trim()) return;
+  $("#prompt").value = text;
+  updatePromptCount();
+  invalidatePreview();
+  $("#ir-result-dialog").close("use");
+  $(".composer-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  toast("IR text loaded into Direction as a fresh workspace intent.");
+}
+
 function jobSettings(job) {
   const task = jobTask(job);
   return {
@@ -937,7 +1022,20 @@ function renderJobs() {
       unavailable.title = "MiniMax rejects cancellation after a task begins running";
       actions.append(unavailable);
     } else if (job.status === "succeeded") {
+      if (job.operation === "h3_context_ir") {
+        const viewResult = makeButton(
+          irResultText(job) ? "View IR text" : "IR text unavailable",
+          "micro-button",
+          () => openIrResult(job),
+          !irResultText(job),
+        );
+        if (viewResult.disabled) {
+          viewResult.title = "Refresh until MiniMax returns the completed IR prompt";
+        }
+        actions.append(viewResult);
+      }
       if (task.modality !== "text" && job.operation !== "h3_context_ir") {
+        actions.append(makeButton("Preview video", "micro-button", () => previewOutput(job)));
         actions.append(makeButton("Save MP4", "micro-button", () => saveOutput(job)));
       }
       if (settings.resolution === "768P" && job.operation === "generation") {
@@ -1088,6 +1186,33 @@ async function removeLocalJob(job) {
   }
 }
 
+async function previewOutput(job) {
+  const previewWindow = window.open("about:blank", "_blank");
+  if (!previewWindow) {
+    toast("The browser blocked the video preview window. Allow pop-ups for H3 Studio.", true);
+    return;
+  }
+  previewWindow.opener = null;
+  try {
+    let previewUrl;
+    if (job.downloaded_filename) {
+      previewUrl = `/api/downloads/${encodeURIComponent(job.downloaded_filename)}`;
+    } else {
+      toast("Creating a local preview copy of the completed video…");
+      const result = await api(`/api/jobs/${encodeURIComponent(job.task_id)}/download`, {
+        method: "POST",
+      });
+      previewUrl = result.download_url;
+      await loadJobs();
+    }
+    previewWindow.location.replace(previewUrl);
+    toast("Video preview opened in a new window.");
+  } catch (error) {
+    previewWindow.close();
+    toast(error.message, true);
+  }
+}
+
 async function saveOutput(job) {
   try {
     toast("Refreshing the expiring result link and saving the MP4 locally…");
@@ -1220,6 +1345,29 @@ function setupDialogs() {
     if (!assetId) return;
     const asset = state.assets.find((item) => item.id === assetId);
     if (!asset) return;
+    if (event.submitter?.value === "resize") {
+      const button = event.submitter;
+      const form = new FormData(event.currentTarget);
+      setBusy(button, true, "Creating copy…");
+      try {
+        const resized = await api(`/api/assets/${encodeURIComponent(assetId)}/resize`, {
+          method: "POST",
+          body: {
+            ratio: String(form.get("resize_ratio") || "16:9"),
+            max_edge: Number(form.get("resize_max_edge") || 2048),
+          },
+        });
+        state.renamingAssetId = null;
+        $("#rename-dialog").close("default");
+        await loadAssets();
+        toast(`Created ${resized.name}. The original image is unchanged.`);
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        setBusy(button, false);
+      }
+      return;
+    }
     const body = {
       name: String(form.get("name") || "").trim(),
       notes: String(form.get("notes") || ""),
@@ -1289,6 +1437,8 @@ function setupEvents() {
   });
   $("#copy-prompt").addEventListener("click", copyPrompt);
   $("#paste-prompt").addEventListener("click", pastePrompt);
+  $("#copy-ir-result").addEventListener("click", copyIrResult);
+  $("#use-ir-result").addEventListener("click", useIrResultAsDirection);
   for (const id of ["resolution", "duration", "ratio", "watermark"]) {
     $(`#${id}`).addEventListener("change", () => {
       updateCost();

@@ -208,7 +208,46 @@ async def test_polling_sanitizes_signed_url_and_download_omits_bearer(make_clien
     assert saved.status_code == 200
     download = await client.get(saved.json()["download_url"])
     assert download.content == b"fake-mp4-bytes"
+    assert download.headers["content-disposition"].startswith("inline;")
     assert upstream.cdn_had_authorization is False
+
+
+async def test_context_ir_returned_text_remains_available_in_local_history(make_client) -> None:
+    task_id = "task-ir-text"
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v2/h3_context_ir":
+            return httpx.Response(200, json={"task_id": task_id})
+        if request.method == "GET" and request.url.path.endswith(f"/{task_id}"):
+            return httpx.Response(
+                200,
+                json={
+                    "task": {
+                        "id": task_id,
+                        "status": "succeeded",
+                        "task_type": "h3_context_ir",
+                        "modality": "text",
+                        "content": {"prompt": "A full enhanced prompt returned by Context IR."},
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected upstream request: {request.method} {request.url}")
+
+    client = make_client(provider)
+    body = generation_request("request-ir-returned-text")
+    body.pop("resolution")
+    body.pop("aigc_watermark")
+    body["confirmed"] = True
+
+    created = await client.post("/api/context-ir", json=body)
+    refreshed = await client.post(f"/api/jobs/{task_id}/refresh")
+    jobs = (await client.get("/api/jobs")).json()
+
+    assert created.status_code == 201
+    assert refreshed.status_code == 200
+    assert jobs[0]["response"]["task"]["content"]["prompt"] == (
+        "A full enhanced prompt returned by Context IR."
+    )
 
 
 async def test_concurrent_tabs_coalesce_the_same_task_refresh(make_client) -> None:

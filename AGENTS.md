@@ -37,9 +37,13 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - Assets, submissions, and jobs persist in the repository data directory's SQLite/WAL database.
   Preserve restart durability; only coordination locks, rate timers, and short poll caches belong
   exclusively in RAM.
+- Image-editor resizing is a local JPEG/PNG/WebP center-crop/downscale operation that creates a new
+  asset and preserves the original. Never fetch remote images or involve a provider in this path.
 - Polling must remain serialized and request-budgeted in the browser, coalesced/rate-limited across
   tabs on the server, and globally honor provider `Retry-After`. Signed output URLs remain
   server-side; never forward the Bearer header to an output CDN.
+- Video output previews must reuse the server-side local download path; never expose signed output
+  URLs to a preview window. Preserve full Context IR returned text in local job history.
 - Keep spend confirmation text aligned with MiniMax's current public pay-go pricing. If a charge
   cannot be calculated (for example an input video's duration), label it as unknown instead of
   inventing a value.

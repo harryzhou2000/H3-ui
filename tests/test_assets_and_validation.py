@@ -123,6 +123,91 @@ async def test_asset_editor_rejects_value_edits_for_the_wrong_source_type(make_c
     assert "private" in remote_private.text.lower()
 
 
+async def test_local_image_editor_creates_a_distinct_resized_copy(make_client) -> None:
+    client = make_client(no_upstream)
+    source_bytes = png_bytes((96, 60))
+    original = (
+        await client.post(
+            "/api/assets/upload",
+            files={"file": ("wide.png", source_bytes, "image/png")},
+            data={"name": "Wide frame", "notes": "Keep this", "tags": "hero, blue"},
+        )
+    ).json()
+
+    response = await client.post(
+        f"/api/assets/{original['id']}/resize",
+        json={"ratio": "1:1", "max_edge": 32},
+    )
+
+    assert response.status_code == 201
+    resized = response.json()
+    assert resized["id"] != original["id"]
+    assert resized["source_type"] == "local"
+    assert resized["mime_type"] == "image/png"
+    assert resized["notes"] == "Keep this"
+    assert resized["tags"] == ["hero", "blue"]
+    assert "1:1" in resized["name"]
+    resized_content = await client.get(resized["preview_url"])
+    with Image.open(BytesIO(resized_content.content)) as image:
+        assert image.size == (32, 32)
+
+    original_content = await client.get(original["preview_url"])
+    assert original_content.content == source_bytes
+    assert len((await client.get("/api/assets")).json()) == 2
+
+
+async def test_local_image_resize_rejects_remote_and_non_image_assets(make_client) -> None:
+    client = make_client(no_upstream)
+    remote = (
+        await client.post(
+            "/api/assets/remote",
+            json={"kind": "image", "name": "Remote", "url": "https://cdn.test/frame.png"},
+        )
+    ).json()
+    audio = (
+        await client.post(
+            "/api/assets/upload",
+            files={"file": ("tone.mp3", b"ID3-test-audio", "audio/mpeg")},
+        )
+    ).json()
+
+    remote_response = await client.post(
+        f"/api/assets/{remote['id']}/resize", json={"ratio": "16:9", "max_edge": 2048}
+    )
+    audio_response = await client.post(
+        f"/api/assets/{audio['id']}/resize", json={"ratio": "16:9", "max_edge": 2048}
+    )
+
+    assert remote_response.status_code == 422
+    assert "requires a local image" in remote_response.text
+    assert audio_response.status_code == 422
+    assert "Only image assets" in audio_response.text
+    assert len((await client.get("/api/assets")).json()) == 2
+
+
+async def test_local_image_resize_validates_ratio_and_size_before_work(make_client) -> None:
+    client = make_client(no_upstream)
+    original = (
+        await client.post(
+            "/api/assets/upload",
+            files={"file": ("wide.png", png_bytes(), "image/png")},
+        )
+    ).json()
+
+    adaptive = await client.post(
+        f"/api/assets/{original['id']}/resize",
+        json={"ratio": "adaptive", "max_edge": 2048},
+    )
+    oversized = await client.post(
+        f"/api/assets/{original['id']}/resize",
+        json={"ratio": "16:9", "max_edge": 4097},
+    )
+
+    assert adaptive.status_code == 422
+    assert oversized.status_code == 422
+    assert len((await client.get("/api/assets")).json()) == 1
+
+
 async def test_local_upload_and_content_round_trip(make_client) -> None:
     client = make_client(no_upstream)
     created = await client.post(
@@ -176,6 +261,17 @@ def test_center_crop_preserves_pixels_and_reaches_requested_ratio(tmp_path) -> N
 
     with Image.open(BytesIO(cropped)) as image:
         assert image.size == (48, 27)
+    assert mime == "image/png"
+
+
+def test_center_crop_downscales_oversized_images_locally(tmp_path) -> None:
+    source = tmp_path / "wide.png"
+    source.write_bytes(png_bytes((48, 30)))
+
+    resized, mime = crop_image_to_ratio(source, "16:9", max_edge=32)
+
+    with Image.open(BytesIO(resized)) as image:
+        assert image.size == (32, 18)
     assert mime == "image/png"
 
 
