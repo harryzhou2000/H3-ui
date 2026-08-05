@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      name="description"
+      content="A local-first multimodal workspace for MiniMax H3 video generation"
+    />
+    <title>H3 Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="H3 Studio home">
+          <span class="brand-mark">H3</span>
+          <span>
+            <strong>Studio</strong>
+            <small>Multimodal video workspace</small>
+          </span>
+        </a>
+        <div class="topbar-center" aria-label="Safety status">
+          <span class="safety-lock">Key stays server-side</span>
+          <span class="divider" aria-hidden="true"></span>
+          <span>No automatic billable retries</span>
+        </div>
+        <div class="connection-actions">
+          <span id="connection-pill" class="connection-pill is-loading">
+            <span class="status-dot"></span>
+            Checking server
+          </span>
+          <button id="test-connection" class="button button-quiet button-small" type="button">
+            Test connection
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="library-panel panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Input library</p>
+              <h1>Source shelf</h1>
+            </div>
+            <span id="asset-count" class="count-badge">0</span>
+          </div>
+          <p class="panel-intro">
+            Keep prompts, frames, reference video, and audio together. Local files remain on this
+            machine until you generate or explicitly upload them.
+          </p>
+
+          <div class="library-actions">
+            <label class="button button-primary upload-button">
+              <input id="file-input" type="file" multiple accept="image/*,video/mp4,video/quicktime,audio/wav,audio/mpeg,.heic,.heif" />
+              <span>＋ Add files</span>
+            </label>
+            <button id="add-text" class="button button-secondary" type="button">Text</button>
+            <button id="add-remote" class="button button-secondary" type="button">URL / file ID</button>
+          </div>
+
+          <label class="search-field">
+            <span class="sr-only">Search input library</span>
+            <span aria-hidden="true">⌕</span>
+            <input id="asset-search" type="search" placeholder="Search inputs or tags" />
+          </label>
+          <div id="asset-filters" class="segmented segmented-compact" aria-label="Filter assets">
+            <button class="is-active" type="button" data-kind="all">All</button>
+            <button type="button" data-kind="text">Text</button>
+            <button type="button" data-kind="image">Images</button>
+            <button type="button" data-kind="video">Video</button>
+            <button type="button" data-kind="audio">Audio</button>
+          </div>
+
+          <div id="drop-zone" class="drop-zone" tabindex="0">
+            <span class="drop-icon">↧</span>
+            <strong>Drop files here</strong>
+            <small>Images ≤30 MB · video ≤50 MB · audio ≤15 MB</small>
+          </div>
+
+          <div id="asset-list" class="asset-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="composer-panel panel">
+          <div class="panel-heading composer-heading">
+            <div>
+              <p class="eyebrow">New generation</p>
+              <h1>Build a scene</h1>
+            </div>
+            <span id="mode-chip" class="mode-chip">Text to video</span>
+          </div>
+
+          <div class="prompt-card">
+            <div class="field-heading">
+              <label for="prompt">Direction</label>
+              <span id="prompt-count">0 / 7,000</span>
+            </div>
+            <textarea
+              id="prompt"
+              maxlength="7000"
+              rows="7"
+              placeholder="Describe the shot, motion, camera, soundscape, timing, and mood…"
+            ></textarea>
+            <div class="prompt-footer">
+              <span>One clear prompt is required for every H3 task.</span>
+              <button id="clear-composer" class="text-button" type="button">Clear scene</button>
+            </div>
+          </div>
+
+          <section class="attached-section" aria-labelledby="attached-title">
+            <div class="section-heading-row">
+              <div>
+                <h2 id="attached-title">Attached media</h2>
+                <p>Choose each asset’s job in the scene. Frame and reference modes cannot mix.</p>
+              </div>
+              <span id="attached-count" class="count-badge count-muted">0</span>
+            </div>
+            <div id="attached-list" class="attached-list"></div>
+          </section>
+
+          <section class="settings-section" aria-labelledby="settings-title">
+            <div class="section-heading-row">
+              <div>
+                <h2 id="settings-title">Output settings</h2>
+                <p>MiniMax-H3 · asynchronous generation</p>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <label>
+                <span>Model</span>
+                <input value="MiniMax-H3" disabled />
+              </label>
+              <label>
+                <span>Resolution</span>
+                <select id="resolution">
+                  <option value="768P">768P · ¥0.50/s</option>
+                  <option value="2K">2K · ¥0.80/s</option>
+                </select>
+              </label>
+              <label>
+                <span>Duration</span>
+                <select id="duration"></select>
+              </label>
+              <label>
+                <span>Aspect ratio</span>
+                <select id="ratio">
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                  <option value="1:1">1:1</option>
+                  <option value="4:3">4:3</option>
+                  <option value="3:4">3:4</option>
+                  <option value="21:9">21:9</option>
+                  <option value="adaptive">Adaptive</option>
+                </select>
+              </label>
+              <label class="toggle-field">
+                <span>
+                  <strong>AIGC watermark</strong>
+                  <small>Add the provider’s AI-generated marker</small>
+                </span>
+                <input id="watermark" type="checkbox" />
+              </label>
+            </div>
+          </section>
+
+          <div id="validation-panel" class="validation-panel is-neutral" aria-live="polite">
+            <span class="validation-icon">◇</span>
+            <div>
+              <strong>Ready for a request review</strong>
+              <p>Review validates the exact payload locally. It does not contact MiniMax.</p>
+            </div>
+          </div>
+
+          <details id="request-preview" class="request-preview">
+            <summary>Request preview</summary>
+            <pre id="request-json">No validated request yet.</pre>
+          </details>
+
+          <div class="composer-actions">
+            <button id="review-request" class="button button-secondary button-large" type="button">
+              Review request
+            </button>
+            <button id="generate" class="button button-accent button-large" type="button" disabled>
+              Generate video
+              <span id="cost-inline">from ¥2.00</span>
+            </button>
+          </div>
+
+          <details class="advanced-tools">
+            <summary>Advanced API operations</summary>
+            <div class="advanced-grid">
+              <div>
+                <strong>H3 Context IR</strong>
+                <p>Turn this multimodal scene into an enhanced prompt. Token-billed.</p>
+              </div>
+              <button id="context-ir" class="button button-secondary" type="button">
+                Create IR task
+              </button>
+            </div>
+          </details>
+        </section>
+
+        <aside class="tasks-panel panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Persistent queue</p>
+              <h1>Active task pool</h1>
+            </div>
+            <span id="active-count" class="active-count"><b>0</b> active</span>
+          </div>
+
+          <div class="pool-rule">
+            <span aria-hidden="true">＋</span>
+            <p>
+              <strong>Submissions accumulate.</strong>
+              New jobs join this pool; existing jobs keep running and polling until terminal.
+            </p>
+          </div>
+
+          <div class="pool-toolbar">
+            <div id="job-filters" class="segmented" aria-label="Filter task pool">
+              <button class="is-active" type="button" data-status="active">Active</button>
+              <button type="button" data-status="all">All</button>
+              <button type="button" data-status="complete">Done</button>
+            </div>
+            <button id="sync-tasks" class="icon-button" type="button" title="Sync recent MiniMax tasks" aria-label="Sync recent MiniMax tasks">↻</button>
+          </div>
+
+          <div class="polling-row">
+            <span><i class="live-pulse"></i> Polling every 8 seconds</span>
+            <label class="mini-switch">
+              <span class="sr-only">Enable automatic polling</span>
+              <input id="polling-toggle" type="checkbox" checked />
+            </label>
+          </div>
+
+          <div id="job-list" class="job-list" aria-live="polite"></div>
+
+          <div class="kill-note">
+            <strong>About “Kill”</strong>
+            <p>
+              MiniMax only permits killing a task while it is <code>queued</code>. Once it is
+              <code>running</code>, cancellation is rejected by the API. H3 Studio never kills a
+              task implicitly.
+            </p>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="text-dialog" class="modal">
+      <form method="dialog" id="text-form">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Input library</p>
+            <h2>Save a text prompt</h2>
+          </div>
+          <button class="modal-close" value="cancel" aria-label="Close">×</button>
+        </div>
+        <label>
+          <span>Name</span>
+          <input name="name" required maxlength="160" placeholder="Night train opening" />
+        </label>
+        <label>
+          <span>Text</span>
+          <textarea name="text" required maxlength="7000" rows="8" placeholder="Your reusable prompt…"></textarea>
+        </label>
+        <label>
+          <span>Tags <small>comma-separated</small></span>
+          <input name="tags" placeholder="cinematic, exterior" />
+        </label>
+        <div class="modal-actions">
+          <button class="button button-quiet" value="cancel">Cancel</button>
+          <button class="button button-primary" value="default">Save text</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="remote-dialog" class="modal">
+      <form method="dialog" id="remote-form">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Input library</p>
+            <h2>Add a remote input</h2>
+          </div>
+          <button class="modal-close" value="cancel" aria-label="Close">×</button>
+        </div>
+        <label>
+          <span>Kind</span>
+          <select name="kind">
+            <option value="image">Image</option>
+            <option value="video">Video</option>
+            <option value="audio">Audio</option>
+          </select>
+        </label>
+        <label>
+          <span>Name</span>
+          <input name="name" required maxlength="160" placeholder="Reference clip" />
+        </label>
+        <label>
+          <span>Public URL or MiniMax file ID</span>
+          <input name="url" required maxlength="4096" placeholder="https://… or mm_file://123456" />
+        </label>
+        <p class="form-note">Private-network URLs are blocked. MiniMax file inputs expire after seven days.</p>
+        <div class="modal-actions">
+          <button class="button button-quiet" value="cancel">Cancel</button>
+          <button class="button button-primary" value="default">Add input</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="modal confirm-modal">
+      <form method="dialog" id="confirm-form">
+        <span id="confirm-icon" class="confirm-icon">!</span>
+        <h2 id="confirm-title">Confirm operation</h2>
+        <p id="confirm-description"></p>
+        <div id="confirm-summary" class="confirm-summary"></div>
+        <label id="confirm-check-row" class="confirm-check">
+          <input id="confirm-check" type="checkbox" />
+          <span id="confirm-check-label">I understand this can spend MiniMax credits.</span>
+        </label>
+        <div class="modal-actions">
+          <button class="button button-quiet" value="cancel">Go back</button>
+          <button id="confirm-submit" class="button button-accent" value="default" disabled>Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
